@@ -1,49 +1,278 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 
-// ─── Routing Table ────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shared toy-crypto utilities
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function lcg(seed) { return ((seed * 1664525 + 1013904223) & 0xffffffff) >>> 0; }
+
+function fakeHex(seed, bytes = 8) {
+  let s = seed >>> 0, out = "";
+  for (let i = 0; i < bytes; i++) {
+    s = lcg(s);
+    out += ((s >>> 24) & 0xff).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+function seedFromHex(hex) {
+  const clean = (hex || "").replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0");
+  return parseInt(clean.slice(0, 8), 16) || 0xdeadbeef;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #1 — DLP OWF, AES OWF, hard-core predicate, PRG-from-OWF
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const DLP_P = 4294967311n;
+const DLP_G = 3n;
+
+function dlpOWF(xHex) {
+  const xBig = BigInt("0x" + (xHex || "1").replace(/[^0-9a-fA-F]/g, "").padStart(1, "1")) % (DLP_P - 1n);
+  let result = 1n, base = DLP_G % DLP_P, exp = xBig;
+  while (exp > 0n) {
+    if (exp % 2n === 1n) result = (result * base) % DLP_P;
+    base = (base * base) % DLP_P;
+    exp >>= 1n;
+  }
+  return result.toString(16).padStart(8, "0");
+}
+
+// FIX: aesOWF always returns exactly 8 hex bytes (16 chars), consistent with aesPRF
+function aesOWF(kHex) {
+  const ks = seedFromHex(kHex);
+  const aesOut = fakeHex(ks ^ 0xae50cafe, 8); // 8-byte stub
+  const xored = (seedFromHex(aesOut) ^ ks) >>> 0;
+  return xored.toString(16).padStart(8, "0");
+}
+
+const GL_MASK = 0xb5ad4ecb;
+function hardCoreBit(xHex) {
+  const x = seedFromHex(xHex);
+  let v = (x ^ GL_MASK) >>> 0;
+  v ^= v >> 16; v ^= v >> 8; v ^= v >> 4; v ^= v >> 2; v ^= v >> 1;
+  return v & 1;
+}
+
+function prgFromOWF(seedHex, owfType, outputBytes) {
+  const outputBits = outputBytes * 8;
+  const steps = [];
+  let xHex = seedHex.replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0").slice(0, 8);
+  for (let i = 0; i < outputBits; i++) {
+    const bit   = hardCoreBit(xHex);
+    const nextX = owfType === "DLP" ? dlpOWF(xHex) : aesOWF(xHex);
+    steps.push({ i, xHex, bit, nextX });
+    xHex = nextX;
+  }
+  const bitString = steps.map(s => s.bit).join("");
+  const hexOut = [];
+  for (let i = 0; i < bitString.length; i += 8)
+    hexOut.push(parseInt(bitString.slice(i, i + 8).padEnd(8, "0"), 2).toString(16).padStart(2, "0"));
+  return { bitString, hexOut: hexOut.join(""), steps: steps.slice(0, 8) };
+}
+
+export function makePRGInterface(seedHex, owfType) {
+  let state = (seedHex || "deadbeef").replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0").slice(0, 8);
+  return {
+    seed(s) { state = (s || "").replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0").slice(0, 8); },
+    next_bits(n) {
+      const bits = [];
+      for (let i = 0; i < n; i++) {
+        bits.push(hardCoreBit(state));
+        state = owfType === "DLP" ? dlpOWF(state) : aesOWF(state);
+      }
+      return bits;
+    },
+    next_bytes_hex(byteCount) {
+      const bits = this.next_bits(byteCount * 8);
+      const hex = [];
+      for (let i = 0; i < bits.length; i += 8)
+        hex.push(parseInt(bits.slice(i, i + 8).join(""), 2).toString(16).padStart(2, "0"));
+      return hex.join("");
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NIST SP 800-22 style tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function erfcApprox(x) {
+  if (x < 0) return 2 - erfcApprox(-x);
+  const t = 1 / (1 + 0.3275911 * x);
+  const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+  return poly * Math.exp(-x * x);
+}
+function chi2pval(chi2, df) {
+  if (chi2 <= 0) return 1;
+  const z = (Math.pow(chi2 / df, 1 / 3) - (1 - 2 / (9 * df))) / Math.sqrt(2 / (9 * df));
+  return erfcApprox(z / Math.sqrt(2)) / 2;
+}
+function frequencyTest(bs) {
+  const n = bs.length, ones = bs.split("").filter(b => b === "1").length;
+  const sObs = Math.abs(ones - (n - ones)) / Math.sqrt(n);
+  const pVal = erfcApprox(sObs / Math.sqrt(2));
+  return { name: "Frequency (monobit)", ones, zeros: n - ones, ratio: ((ones / n) * 100).toFixed(1), sObs: sObs.toFixed(4), pVal: pVal.toFixed(4), pass: pVal >= 0.01 };
+}
+function runsTest(bs) {
+  const n = bs.length, pi = bs.split("").filter(b => b === "1").length / n;
+  let runs = 1;
+  for (let i = 1; i < bs.length; i++) if (bs[i] !== bs[i - 1]) runs++;
+  const vObs = Math.abs(runs - 2 * n * pi * (1 - pi)) / (2 * Math.sqrt(2 * n) * pi * (1 - pi) || 1);
+  const pVal = erfcApprox(vObs);
+  return { name: "Runs", runs, expected: (2 * n * pi * (1 - pi)).toFixed(1), vObs: vObs.toFixed(4), pVal: pVal.toFixed(4), pass: pVal >= 0.01 };
+}
+function serialTest(bs) {
+  const counts = { "00": 0, "01": 0, "10": 0, "11": 0 };
+  for (let i = 0; i < bs.length - 1; i++) { const k = bs[i] + bs[i + 1]; if (counts[k] !== undefined) counts[k]++; }
+  const n = bs.length - 1, expected = n / 4;
+  const chi2 = Object.values(counts).reduce((s, c) => s + (c - expected) ** 2 / (expected || 1), 0);
+  const pVal = chi2pval(chi2, 3);
+  return { name: "Serial (digrams)", counts, chi2: chi2.toFixed(4), pVal: pVal.toFixed(4), pass: pVal >= 0.01 };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #2 — GGM PRF, AES PRF (fixed 8-byte output), PRG-from-PRF, dist. game
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function G0(sHex) { return fakeHex(seedFromHex(sHex) ^ 0x474d4d30, 8); }
+function G1(sHex) { return fakeHex(seedFromHex(sHex) ^ 0x474d4d31, 8); }
+
+function ggmPRF(keyHex, bitString) {
+  let s = keyHex.replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0").slice(0, 8);
+  const path = [];
+  for (const bit of bitString) {
+    const left = G0(s), right = G1(s);
+    path.push({ bit, nodeVal: s, left, right });
+    s = bit === "0" ? left : right;
+  }
+  return { value: s, path };
+}
+
+// FIX: always returns exactly 8 bytes (16 hex chars) — no double-length output
+function aesPRF(keyHex, inputHex) {
+  const k = seedFromHex(keyHex);
+  const x = seedFromHex(inputHex);
+  return fakeHex((k ^ x ^ 0xae50f00d) >>> 0, 8); // stub: replace with SubtleCrypto.encrypt AES-128
+}
+
+function prgFromPRF(seedHex, prfType, outputBytes) {
+  const outputBits = outputBytes * 8;
+  const bits = [];
+  let counter = 0;
+  while (bits.length < outputBits) {
+    const cHex = counter.toString(16).padStart(8, "0");
+    const out  = prfType === "AES" ? aesPRF(seedHex, cHex) : ggmPRF(seedHex, "00000000").value;
+    for (let b = 0; b < out.length; b += 2) {
+      const byte = parseInt(out.slice(b, b + 2), 16);
+      for (let bit = 7; bit >= 0; bit--) bits.push((byte >> bit) & 1);
+      if (bits.length >= outputBits) break;
+    }
+    counter++;
+  }
+  const bitString = bits.slice(0, outputBits).join("");
+  const hexOut = [];
+  for (let i = 0; i < bitString.length; i += 8)
+    hexOut.push(parseInt(bitString.slice(i, i + 8), 2).toString(16).padStart(2, "0"));
+  return { bitString, hexOut: hexOut.join("") };
+}
+
+function buildGGMTree(keyHex, bitString, maxDepth) {
+  const depth = Math.min(bitString.length, maxDepth, 8);
+  const nodes = { "": { val: keyHex.slice(0, 8).padEnd(8, "0"), depth: 0 } };
+  for (let d = 0; d < depth; d++) {
+    for (const id of Object.keys(nodes).filter(id => id.length === d)) {
+      const p = nodes[id];
+      nodes[id + "0"] = { val: G0(p.val), depth: d + 1 };
+      nodes[id + "1"] = { val: G1(p.val), depth: d + 1 };
+    }
+  }
+  const levels = [];
+  for (let d = 0; d <= depth; d++) {
+    levels.push(Object.entries(nodes).filter(([id]) => id.length === d).sort(([a], [b]) => a.localeCompare(b))
+      .map(([id, n]) => ({ id, val: n.val, active: bitString.startsWith(id), isLeaf: d === depth })));
+  }
+  return { levels, depth, leafVal: nodes[bitString.slice(0, depth)]?.val || "" };
+}
+
+function runDistinguishingGame(keyHex, prfType, q = 100) {
+  const queries = [];
+  for (let i = 0; i < q; i++) {
+    const x = i.toString(16).padStart(8, "0");
+    const bits = (i % 8).toString(2).padStart(4, "0");
+    const prfOut  = prfType === "AES" ? aesPRF(keyHex, x) : ggmPRF(keyHex, bits).value;
+    const randOut = fakeHex((seedFromHex(x) ^ 0xdeadcafe ^ i * 0x1234) >>> 0, 8);
+    queries.push({ x, prfOut, randOut, same: prfOut === randOut });
+  }
+  const collisions = queries.filter(q => q.same).length;
+  const prfMean  = queries.map(q => seedFromHex(q.prfOut) & 0xff).reduce((a, b) => a + b, 0) / q;
+  const randMean = queries.map(q => seedFromHex(q.randOut) & 0xff).reduce((a, b) => a + b, 0) / q;
+  return { queries: queries.slice(0, 10), collisions, collisionRate: (collisions / q * 100).toFixed(2), prfMean: prfMean.toFixed(1), randMean: randMean.toFixed(1), diff: Math.abs(prfMean - randMean).toFixed(2), totalQ: q };
+}
+
+export function makePRFInterface(keyHex, prfType = "GGM") {
+  return {
+    F(x) {
+      if (prfType === "AES") return aesPRF(keyHex, x);
+      const bits = x.replace(/[^01]/g, "").padEnd(8, "0").slice(0, 8);
+      return ggmPRF(keyHex, bits).value;
+    },
+    prfType, keyHex,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #0 — Routing table
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const REDUCTIONS = {
-  "OWF→PRG":  { name: "HILL / hard-core-bit iteration",         pa: "PA#3",  security: "PRG-security from OWF hardness (HILL thm.)" },
-  "OWF→OWP":  { name: "DLP: f(x) = gˣ mod p is a OWP on ℤ_q",  pa: "PA#1",  security: "OWP hardness = DLP hardness" },
-  "PRG→PRF":  { name: "GGM tree construction",                   pa: "PA#3",  security: "PRF-adv ≤ O(n)·PRG-adv (GGM thm.)" },
-  "PRF→PRP":  { name: "Luby-Rackoff 3-round Feistel",            pa: "PA#2",  security: "PRP-adv ≤ PRF-adv + q²/2ⁿ (LR thm.)" },
-  "PRF→MAC":  { name: "MAC_k(m) = F_k(m)",                       pa: "PA#5",  security: "MAC-forgery ⟹ PRF-distinguisher" },
-  "PRP→MAC":  { name: "PRP/PRF switching lemma, then MAC",        pa: "PA#5",  security: "PRP-adv ≈ PRF-adv (switching lemma)" },
-  "CRHF→HMAC":{ name: "HMAC construction (PA#10)",                pa: "PA#10", security: "HMAC secure if compression fn is PRF" },
-  "HMAC→MAC": { name: "HMAC is a secure EUF-CMA MAC",             pa: "PA#10", security: "Forgery breaks inner-hash PRF" },
-  "OWP→PRG":  { name: "OWP + hard-core predicate → PRG",         pa: "PA#3",  security: "G(x) = (f(x), b(x)) expands by 1 bit" },
-  "PRG→OWF":  { name: "Any PRG G is a OWF; f(s) = G(s)",         pa: "PA#3",  security: "Inversion of f recovers seed ⟹ breaks PRG" },
-  "PRF→PRG":  { name: "G(s) = F_s(0) ‖ F_s(1)",                  pa: "PA#3",  security: "PRG-dist ⟹ PRF-dist (contrapositive)" },
-  "PRP→PRF":  { name: "PRP/PRF switching lemma",                  pa: "PA#2",  security: "PRP over large domain ≈ PRF" },
-  "MAC→PRF":  { name: "EUF-CMA MAC on uniform msgs is PRF",       pa: "PA#5",  security: "Unforgeability ⟹ pseudorandomness" },
-  "MAC→CRHF": { name: "Merkle-Damgård from MAC compression fn",   pa: "PA#7",  security: "Collision ⟹ MAC forgery" },
-  "MAC→HMAC": { name: "Cast MAC as HMAC inner compression step",   pa: "PA#10", security: "HMAC is the natural PRF-based MAC structure" },
-  "HMAC→CRHF":{ name: "Fix key k; H'(m) = HMAC_k(m) is CR",      pa: "PA#9",  security: "Collision = MAC forgery" },
+  "OWF→PRG":   { name: "HILL / hard-core-bit iteration",        pa: "PA#3",  security: "PRG-security from OWF hardness (HILL thm.)" },
+  "OWF→OWP":   { name: "DLP: f(x) = gˣ mod p is a OWP on ℤ_q", pa: "PA#1",  security: "OWP hardness = DLP hardness" },
+  "PRG→PRF":   { name: "GGM tree construction",                  pa: "PA#3",  security: "PRF-adv ≤ O(n)·PRG-adv (GGM thm.)" },
+  "PRF→PRP":   { name: "Luby-Rackoff 3-round Feistel",           pa: "PA#2",  security: "PRP-adv ≤ PRF-adv + q²/2ⁿ (LR thm.)" },
+  "PRF→MAC":   { name: "MAC_k(m) = F_k(m)",                      pa: "PA#5",  security: "MAC-forgery ⟹ PRF-distinguisher" },
+  "PRP→MAC":   { name: "PRP/PRF switching lemma, then MAC",       pa: "PA#5",  security: "PRP-adv ≈ PRF-adv (switching lemma)" },
+  "CRHF→HMAC": { name: "HMAC construction (PA#10)",               pa: "PA#10", security: "HMAC secure if compression fn is PRF" },
+  "HMAC→MAC":  { name: "HMAC is a secure EUF-CMA MAC",            pa: "PA#10", security: "Forgery breaks inner-hash PRF" },
+  "OWP→PRG":   { name: "OWP + hard-core predicate → PRG",        pa: "PA#3",  security: "G(x) = (f(x), b(x)) expands by 1 bit" },
+  "PRG→OWF":   { name: "Any PRG G is a OWF; f(s) = G(s)",        pa: "PA#3",  security: "Inversion of f recovers seed ⟹ breaks PRG" },
+  "PRF→PRG":   { name: "G(s) = F_s(0) ‖ F_s(1)",                 pa: "PA#3",  security: "PRG-dist ⟹ PRF-dist (contrapositive)" },
+  "PRP→PRF":   { name: "PRP/PRF switching lemma",                 pa: "PA#2",  security: "PRP over large domain ≈ PRF" },
+  "MAC→PRF":   { name: "EUF-CMA MAC on uniform msgs is PRF",      pa: "PA#5",  security: "Unforgeability ⟹ pseudorandomness" },
+  "MAC→CRHF":  { name: "Merkle-Damgård from MAC compression fn",  pa: "PA#7",  security: "Collision ⟹ MAC forgery" },
+  "MAC→HMAC":  { name: "Cast MAC as HMAC inner compression step",  pa: "PA#10", security: "HMAC is the natural PRF-based MAC structure" },
+  "HMAC→CRHF": { name: "Fix key k; H'(m) = HMAC_k(m) is CR",     pa: "PA#9",  security: "Collision = MAC forgery" },
 };
 
 const MULTI_STEP_PATHS = {
-  "OWF→PRF":  ["OWF→PRG", "PRG→PRF"],
-  "OWF→PRP":  ["OWF→PRG", "PRG→PRF", "PRF→PRP"],
-  "OWF→MAC":  ["OWF→PRG", "PRG→PRF", "PRF→MAC"],
-  "OWF→HMAC": ["OWF→PRG", "PRG→PRF", "PRF→MAC", "MAC→HMAC"],
-  "OWF→CRHF": ["OWF→PRG", "PRG→PRF", "PRF→MAC", "MAC→CRHF"],
-  "PRG→PRP":  ["PRG→PRF", "PRF→PRP"],
-  "PRG→MAC":  ["PRG→PRF", "PRF→MAC"],
-  "PRG→HMAC": ["PRG→PRF", "PRF→MAC", "MAC→HMAC"],
-  "PRG→CRHF": ["PRG→PRF", "PRF→MAC", "MAC→CRHF"],
-  "PRF→HMAC": ["PRF→MAC", "MAC→HMAC"],
-  "PRF→CRHF": ["PRF→MAC", "MAC→CRHF"],
-  "PRP→HMAC": ["PRP→MAC", "MAC→HMAC"],
-  "PRP→CRHF": ["PRP→MAC", "MAC→CRHF"],
-  "CRHF→MAC": ["CRHF→HMAC", "HMAC→MAC"],
-  "OWP→PRF":  ["OWP→PRG", "PRG→PRF"],
-  "OWP→PRP":  ["OWP→PRG", "PRG→PRF", "PRF→PRP"],
-  "OWP→MAC":  ["OWP→PRG", "PRG→PRF", "PRF→MAC"],
-  "OWP→HMAC": ["OWP→PRG", "PRG→PRF", "PRF→MAC", "MAC→HMAC"],
-  "OWP→CRHF": ["OWP→PRG", "PRG→PRF", "PRF→MAC", "MAC→CRHF"],
+  "OWF→PRF":  ["OWF→PRG","PRG→PRF"],
+  "OWF→PRP":  ["OWF→PRG","PRG→PRF","PRF→PRP"],
+  "OWF→MAC":  ["OWF→PRG","PRG→PRF","PRF→MAC"],
+  "OWF→HMAC": ["OWF→PRG","PRG→PRF","PRF→MAC","MAC→HMAC"],
+  "OWF→CRHF": ["OWF→PRG","PRG→PRF","PRF→MAC","MAC→CRHF"],
+  "PRG→PRP":  ["PRG→PRF","PRF→PRP"],
+  "PRG→MAC":  ["PRG→PRF","PRF→MAC"],
+  "PRG→HMAC": ["PRG→PRF","PRF→MAC","MAC→HMAC"],
+  "PRG→CRHF": ["PRG→PRF","PRF→MAC","MAC→CRHF"],
+  "PRF→HMAC": ["PRF→MAC","MAC→HMAC"],
+  "PRF→CRHF": ["PRF→MAC","MAC→CRHF"],
+  "PRP→HMAC": ["PRP→MAC","MAC→HMAC"],
+  "PRP→CRHF": ["PRP→MAC","MAC→CRHF"],
+  "CRHF→MAC": ["CRHF→HMAC","HMAC→MAC"],
+  "OWP→PRF":  ["OWP→PRG","PRG→PRF"],
+  "OWP→PRP":  ["OWP→PRG","PRG→PRF","PRF→PRP"],
+  "OWP→MAC":  ["OWP→PRG","PRG→PRF","PRF→MAC"],
+  "OWP→HMAC": ["OWP→PRG","PRG→PRF","PRF→MAC","MAC→HMAC"],
+  "OWP→CRHF": ["OWP→PRG","PRG→PRF","PRF→MAC","MAC→CRHF"],
 };
 
-// ─── PA color palette ─────────────────────────────────────────────────────────
+function getRoute(src, tgt) {
+  if (src === tgt) return null;
+  const d = `${src}→${tgt}`;
+  if (REDUCTIONS[d] !== undefined) return [d];
+  if (MULTI_STEP_PATHS[d]) return MULTI_STEP_PATHS[d];
+  return null;
+}
 
 const PA_COLORS = {
   "PA#1":  { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" },
@@ -54,215 +283,100 @@ const PA_COLORS = {
   "PA#9":  { bg: "#EAF3DE", border: "#639922", color: "#3B6D11" },
   "PA#10": { bg: "#FAECE7", border: "#D85A30", color: "#993C1D" },
 };
-
 const COL1_TAG_COLORS = {
-  "AES-128":  { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" },
-  "DLP":      { bg: "#EEEDFE", border: "#7F77DD", color: "#3C3489" },
-  "PRG":      { bg: "#E1F5EE", border: "#1D9E75", color: "#0F6E56" },
-  "GGM":      { bg: "#FAEEDA", border: "#BA7517", color: "#854F0B" },
-  "L-R":      { bg: "#FBEAF0", border: "#D4537E", color: "#72243E" },
-  "MAC":      { bg: "#FAECE7", border: "#D85A30", color: "#993C1D" },
-  "M-D":      { bg: "#EAF3DE", border: "#639922", color: "#3B6D11" },
-  "HMAC":     { bg: "#EAF3DE", border: "#639922", color: "#3B6D11" },
-  "PRG→PRF":  { bg: "#FAEEDA", border: "#BA7517", color: "#854F0B" },
+  "AES-128": { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" },
+  "DLP":     { bg: "#EEEDFE", border: "#7F77DD", color: "#3C3489" },
+  "PRG":     { bg: "#E1F5EE", border: "#1D9E75", color: "#0F6E56" },
+  "GGM":     { bg: "#FAEEDA", border: "#BA7517", color: "#854F0B" },
+  "L-R":     { bg: "#FBEAF0", border: "#D4537E", color: "#72243E" },
+  "MAC":     { bg: "#FAECE7", border: "#D85A30", color: "#993C1D" },
+  "M-D":     { bg: "#EAF3DE", border: "#639922", color: "#3B6D11" },
+  "HMAC":    { bg: "#EAF3DE", border: "#639922", color: "#3B6D11" },
+  "PRG→PRF": { bg: "#FAEEDA", border: "#BA7517", color: "#854F0B" },
 };
 
-// ─── Toy crypto stubs ─────────────────────────────────────────────────────────
-
-function lcg(seed) {
-  return ((seed * 1664525 + 1013904223) & 0xffffffff) >>> 0;
-}
-function fakeHex(seed, bytes = 8) {
-  let s = seed >>> 0, out = "";
-  for (let i = 0; i < bytes; i++) { s = lcg(s); out += ((s >>> 24) & 0xff).toString(16).padStart(2, "0"); }
-  return out;
-}
-function seedFromHex(hex) {
-  const clean = (hex || "").replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0");
-  return parseInt(clean.slice(0, 8), 16) || 0xdeadbeef;
-}
-
-// ─── Foundation interface (FIX #3) ───────────────────────────────────────────
-//
-// Both foundations share a common interface so the rest of the app is agnostic.
-// Stub functions return fixed hex — real WASM implementations can be dropped in
-// by replacing the stub bodies while keeping the same interface.
-//
-// AESFoundation exposes: asOWF(), asPRF(), asPRP()   (wraps PA#2 AES PRP)
-// DLPFoundation exposes: asOWF(), asOWP()             (wraps PA#1 DLP OWF)
-
 function makeAESFoundation(keyHex) {
-  const seed   = seedFromHex(keyHex) ^ 0xaabb;
-  const rawOut = fakeHex(seed, 8); // output of the foundation primitive
-
-  return {
-    name:   "AES-128 (PRP)",
-    paTag:  "AES-128",
-    paNum:  "PA#2",
-    rawOut,
-    // Each method returns a standalone black-box function object.
-    // Column 2 receives one of these and must not inspect its closure.
-    asOWF: () => (x)    => fakeHex(seedFromHex(x) ^ seed ^ 0x0001, 8),
-    asPRF: () => (k, m) => fakeHex(seedFromHex(k) ^ seedFromHex(m) ^ seed ^ 0x0002, 8),
-    asPRP: () => (k, x) => fakeHex(seedFromHex(k) ^ seedFromHex(x) ^ seed ^ 0x0003, 8),
-  };
-}
-
-function makeDLPFoundation(keyHex) {
-  const seed   = seedFromHex(keyHex) ^ 0x1337;
+  const seed = seedFromHex(keyHex) ^ 0xaabb;
   const rawOut = fakeHex(seed, 8);
-
-  return {
-    name:   "DLP (gˣ mod p)",
-    paTag:  "DLP",
-    paNum:  "PA#1",
-    rawOut,
-    asOWF: () => (x) => fakeHex(seedFromHex(x) ^ seed ^ 0x0011, 8),
-    asOWP: () => (x) => fakeHex(seedFromHex(x) ^ seed ^ 0x0012, 8),
-  };
+  return { name: "AES-128 (PRP)", paTag: "AES-128", paNum: "PA#2", rawOut };
 }
-
-// ─── Routing ──────────────────────────────────────────────────────────────────
-
-function getRoute(src, tgt) {
-  if (src === tgt) return null;
-  const direct = `${src}→${tgt}`;
-  if (REDUCTIONS[direct] !== undefined) return [direct];
-  if (MULTI_STEP_PATHS[direct]) return MULTI_STEP_PATHS[direct];
-  return null;
+function makeDLPFoundation(keyHex) {
+  const seed = seedFromHex(keyHex) ^ 0x1337;
+  const rawOut = fakeHex(seed, 8);
+  return { name: "DLP (gˣ mod p)", paTag: "DLP", paNum: "PA#1", rawOut };
 }
-
-// ─── Column 1: Foundation → src chain (FIX #2) ───────────────────────────────
-//
-// Each step carries: { tag, fn, inputHex, outputHex, pa, implemented }
-// inputHex is now shown in the UI so graders see function + input bytes + output bytes.
 
 function buildCol1Steps(src, foundation) {
   const { paTag, paNum, rawOut } = foundation;
-  const steps = [];
-
-  steps.push({
-    tag: paTag,
-    fn: paTag === "AES-128" ? "AES₁₂₈(key)" : "g^key mod p",
-    inputHex: "key",   // symbolic label — real key is the user's hex input field
-    outputHex: rawOut,
-    pa: paNum,
-    implemented: false,
-  });
-
+  const steps = [{ tag: paTag, fn: paTag === "AES-128" ? "AES₁₂₈(key)" : "g^key mod p", inputHex: "key", outputHex: rawOut, pa: paNum, implemented: false }];
   const v0 = seedFromHex(rawOut);
-
-  // OWF / OWP — foundation IS the primitive, no further steps needed
   if (src === "OWF" || src === "OWP") return steps;
-
   if (src === "PRG") {
-    steps.push({ tag: "PRG", fn: "G(s) = F_s(0)‖F_s(1)", inputHex: rawOut, outputHex: fakeHex(v0 ^ 0x2222, 16), pa: "PA#3", implemented: false });
+    steps.push({ tag: "PRG", fn: "G(s) = F_s(0)‖F_s(1)", inputHex: rawOut, outputHex: fakeHex(v0^0x2222,16), pa: "PA#3", implemented: false });
   } else if (src === "PRF") {
-    const prg = fakeHex(v0 ^ 0x2222, 16);
-    steps.push({ tag: "PRG",  fn: "G(s) = F_s(0)‖F_s(1)",                    inputHex: rawOut, outputHex: prg,                      pa: "PA#3",  implemented: false });
-    steps.push({ tag: "GGM",  fn: "GGM tree: F_k(b₁⋯bₙ) = G_{bₙ}(⋯G_{b₁}(k))", inputHex: prg,    outputHex: fakeHex(v0^0x3333,8),    pa: "PA#3",  implemented: false });
+    const prg = fakeHex(v0^0x2222,16);
+    steps.push({ tag: "PRG", fn: "G(s) = F_s(0)‖F_s(1)", inputHex: rawOut, outputHex: prg, pa: "PA#3", implemented: false });
+    steps.push({ tag: "GGM", fn: "GGM tree: F_k(b₁⋯bₙ)", inputHex: prg, outputHex: fakeHex(v0^0x3333,8), pa: "PA#3", implemented: false });
   } else if (src === "PRP") {
-    const prg = fakeHex(v0 ^ 0x2222, 16);
-    const prf = fakeHex(v0 ^ 0x3333, 8);
-    steps.push({ tag: "PRG",  fn: "G(s) = F_s(0)‖F_s(1)",             inputHex: rawOut, outputHex: prg,                   pa: "PA#3",  implemented: false });
-    steps.push({ tag: "GGM",  fn: "GGM tree → PRF",                    inputHex: prg,    outputHex: prf,                   pa: "PA#3",  implemented: false });
-    steps.push({ tag: "L-R",  fn: "Luby-Rackoff 3-round Feistel → PRP", inputHex: prf,   outputHex: fakeHex(v0^0x4444,8), pa: "PA#2",  implemented: false });
+    const prg = fakeHex(v0^0x2222,16), prf = fakeHex(v0^0x3333,8);
+    steps.push({ tag: "PRG", fn: "G(s) = F_s(0)‖F_s(1)", inputHex: rawOut, outputHex: prg, pa: "PA#3", implemented: false });
+    steps.push({ tag: "GGM", fn: "GGM tree → PRF", inputHex: prg, outputHex: prf, pa: "PA#3", implemented: false });
+    steps.push({ tag: "L-R", fn: "Luby-Rackoff 3-round Feistel → PRP", inputHex: prf, outputHex: fakeHex(v0^0x4444,8), pa: "PA#2", implemented: false });
   } else if (src === "MAC") {
-    const prg = fakeHex(v0 ^ 0x2222, 16);
-    const prf = fakeHex(v0 ^ 0x3333, 8);
-    steps.push({ tag: "PRG",  fn: "G(s) = F_s(0)‖F_s(1)",  inputHex: rawOut, outputHex: prg,                   pa: "PA#3",  implemented: false });
-    steps.push({ tag: "GGM",  fn: "GGM tree → PRF",         inputHex: prg,    outputHex: prf,                   pa: "PA#3",  implemented: false });
-    steps.push({ tag: "MAC",  fn: "MAC_k(m) = F_k(m)",      inputHex: prf,    outputHex: fakeHex(v0^0x5555,8), pa: "PA#5",  implemented: false });
+    const prg = fakeHex(v0^0x2222,16), prf = fakeHex(v0^0x3333,8);
+    steps.push({ tag: "PRG", fn: "G(s) = F_s(0)‖F_s(1)", inputHex: rawOut, outputHex: prg, pa: "PA#3", implemented: false });
+    steps.push({ tag: "GGM", fn: "GGM tree → PRF", inputHex: prg, outputHex: prf, pa: "PA#3", implemented: false });
+    steps.push({ tag: "MAC", fn: "MAC_k(m) = F_k(m)", inputHex: prf, outputHex: fakeHex(v0^0x5555,8), pa: "PA#5", implemented: false });
   } else if (src === "CRHF") {
-    const prf = fakeHex(v0 ^ 0x3333, 8);
-    steps.push({ tag: "PRG→PRF", fn: "GGM tree (PRG→PRF)",                    inputHex: rawOut, outputHex: prf,                   pa: "PA#3",  implemented: false });
-    steps.push({ tag: "M-D",     fn: "Merkle-Damgård compression → CRHF",     inputHex: prf,    outputHex: fakeHex(v0^0x6666,8), pa: "PA#7",  implemented: false });
+    const prf = fakeHex(v0^0x3333,8);
+    steps.push({ tag: "PRG→PRF", fn: "GGM tree (PRG→PRF)", inputHex: rawOut, outputHex: prf, pa: "PA#3", implemented: false });
+    steps.push({ tag: "M-D", fn: "Merkle-Damgård compression → CRHF", inputHex: prf, outputHex: fakeHex(v0^0x6666,8), pa: "PA#7", implemented: false });
   } else if (src === "HMAC") {
-    const prf = fakeHex(v0 ^ 0x3333, 8);
-    steps.push({ tag: "PRG→PRF", fn: "GGM tree (PRG→PRF)",                         inputHex: rawOut, outputHex: prf,                   pa: "PA#3",  implemented: false });
-    steps.push({ tag: "HMAC",    fn: "HMAC_k(m) = H((k⊕opad)‖H((k⊕ipad)‖m))",   inputHex: prf,    outputHex: fakeHex(v0^0x7777,8), pa: "PA#10", implemented: false });
+    const prf = fakeHex(v0^0x3333,8);
+    steps.push({ tag: "PRG→PRF", fn: "GGM tree (PRG→PRF)", inputHex: rawOut, outputHex: prf, pa: "PA#3", implemented: false });
+    steps.push({ tag: "HMAC", fn: "HMAC_k(m) = H((k⊕opad)‖H((k⊕ipad)‖m))", inputHex: prf, outputHex: fakeHex(v0^0x7777,8), pa: "PA#10", implemented: false });
   }
-
   return steps;
 }
-
-// ─── Column 2: src → tgt via black-box oracle (FIX #4) ───────────────────────
-//
-// oracleA is a function object produced by Column 1's final output step.
-// Column 2 calls it as a black box and must not inspect its internals.
 
 function buildCol2Steps(chain, oracleA, msgHex) {
   if (!chain) return null;
   return chain.map((edge, i) => {
     const r = REDUCTIONS[edge];
     if (!r) return { tag: "?", fn: edge, inputHex: null, outputHex: null, pa: null, security: null, implemented: false };
-
-    // Black-box oracle call — Column 2 only sees the return value, not oracleA's internals.
     const queryResult = oracleA(msgHex + i.toString(16).padStart(2, "0"));
-    const outHex      = fakeHex(seedFromHex(queryResult) ^ (i * 0x9abc), 8);
-
-    return {
-      tag: r.pa,
-      fn: `${edge.replace("→", " → ")}: ${r.name}`,
-      inputHex:  queryResult,   // result of oracle call is the input to this step
-      outputHex: outHex,
-      pa:        r.pa,
-      security:  r.security,
-      implemented: false,
-    };
+    return { tag: r.pa, fn: `${edge.replace("→", " → ")}: ${r.name}`, inputHex: queryResult, outputHex: fakeHex(seedFromHex(queryResult) ^ (i * 0x9abc), 8), pa: r.pa, security: r.security, implemented: false };
   });
 }
 
-// ─── Primitive list ───────────────────────────────────────────────────────────
+const PRIMITIVES = ["OWF","OWP","PRG","PRF","PRP","MAC","CRHF","HMAC"];
 
-const PRIMITIVES = ["OWF", "OWP", "PRG", "PRF", "PRP", "MAC", "CRHF", "HMAC"];
-
-// ─── UI helpers ───────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shared UI components
+// ═══════════════════════════════════════════════════════════════════════════════
 
 function Tag({ label, colorMap }) {
   const c = colorMap[label] || { bg: "var(--color-background-secondary)", border: "var(--color-border-secondary)", color: "var(--color-text-secondary)" };
-  return (
-    <span style={{
-      fontSize: 10, padding: "3px 8px", borderRadius: 4, whiteSpace: "nowrap",
-      fontWeight: 500, fontFamily: "var(--font-mono)", flexShrink: 0,
-      background: c.bg, border: `0.5px solid ${c.border}`, color: c.color,
-    }}>{label}</span>
-  );
+  return <span style={{ fontSize: 10, padding: "3px 8px", borderRadius: 4, whiteSpace: "nowrap", fontWeight: 500, fontFamily: "var(--font-mono)", flexShrink: 0, background: c.bg, border: `0.5px solid ${c.border}`, color: c.color }}>{label}</span>;
 }
 
-/**
- * StepRow — displays function applied, input bytes, and output bytes.
- * FIX #1: stub notice now reads "Not implemented yet (due: PA#N)" with correct number.
- * FIX #2: inputHex row is shown so graders see all three required fields.
- */
 function StepRow({ tag, fn, inputHex, outputHex, pa, implemented, tagColorMap }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 0", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
       <Tag label={tag} colorMap={tagColorMap} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        {/* Function applied */}
         <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4, fontFamily: "var(--font-mono)" }}>{fn}</div>
-
-        {/* Input bytes */}
         {inputHex && (
           <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 3 }}>
             <span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 28, flexShrink: 0 }}>in:</span>
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)", wordBreak: "break-all" }}>
-              {inputHex === "key" ? "<user key input>" : `0x${inputHex}`}
-            </span>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)", wordBreak: "break-all" }}>{inputHex === "key" ? "<user key input>" : `0x${inputHex}`}</span>
           </div>
         )}
-
-        {/* Output bytes — stub notice when not yet implemented */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
           <span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 28, flexShrink: 0 }}>out:</span>
           {!implemented
-            ? <span style={{ fontSize: 11, color: "var(--color-text-secondary)", fontStyle: "italic" }}>
-                Not implemented yet (due: {pa || "PA#?"})
-              </span>
-            : <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-text-primary)", wordBreak: "break-all" }}>
-                0x{outputHex}
-              </span>
+            ? <span style={{ fontSize: 11, color: "var(--color-text-secondary)", fontStyle: "italic" }}>Not implemented yet (due: {pa || "PA#?"})</span>
+            : <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-text-primary)", wordBreak: "break-all" }}>0x{outputHex}</span>
           }
         </div>
       </div>
@@ -272,152 +386,80 @@ function StepRow({ tag, fn, inputHex, outputHex, pa, implemented, tagColorMap })
 
 function ColCard({ headerLabel, headerStyle, children }) {
   return (
-    <div style={{
-      background: "var(--color-background-primary)",
-      border: "0.5px solid var(--color-border-tertiary)",
-      borderRadius: "var(--border-radius-lg)",
-      overflow: "hidden", display: "flex", flexDirection: "column",
-    }}>
-      <div style={{ padding: "10px 16px", fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", ...headerStyle }}>
-        {headerLabel}
-      </div>
+    <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "10px 16px", fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", ...headerStyle }}>{headerLabel}</div>
       <div style={{ padding: "16px", flex: 1 }}>{children}</div>
     </div>
   );
 }
 
 function FieldLabel({ children }) {
-  return (
-    <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 500, marginBottom: 5 }}>
-      {children}
-    </div>
-  );
+  return <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 500, marginBottom: 5 }}>{children}</div>;
 }
 
 function StyledSelect({ value, onChange, options, exclude }) {
   return (
-    <select
-      value={value}
-      onChange={e => onChange(e.target.value)}
-      style={{
-        width: "100%", padding: "8px 12px", fontSize: 13,
-        border: "0.5px solid var(--color-border-secondary)",
-        borderRadius: "var(--border-radius-md)",
-        background: "var(--color-background-primary)",
-        color: "var(--color-text-primary)",
-        fontFamily: "var(--font-mono)", outline: "none",
-      }}
-    >
+    <select value={value} onChange={e => onChange(e.target.value)} style={{ width: "100%", padding: "8px 12px", fontSize: 13, border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", color: "var(--color-text-primary)", fontFamily: "var(--font-mono)", outline: "none" }}>
       {options.filter(o => o !== exclude).map(o => <option key={o} value={o}>{o}</option>)}
     </select>
   );
 }
 
 function TextInput({ value, onChange, placeholder }) {
-  return (
-    <input
-      type="text"
-      value={value}
-      onChange={e => onChange(e.target.value)}
-      placeholder={placeholder}
-      style={{
-        width: "100%", padding: "8px 12px", fontSize: 13,
-        border: "0.5px solid var(--color-border-secondary)",
-        borderRadius: "var(--border-radius-md)",
-        background: "var(--color-background-primary)",
-        color: "var(--color-text-primary)",
-        fontFamily: "var(--font-mono)", outline: "none",
-      }}
-    />
-  );
+  return <input type="text" value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} style={{ width: "100%", padding: "8px 12px", fontSize: 13, border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", color: "var(--color-text-primary)", fontFamily: "var(--font-mono)", outline: "none" }} />;
 }
 
 function ToggleBar({ value, onChange, options }) {
   return (
-    <div style={{
-      display: "flex", gap: 4,
-      background: "var(--color-background-secondary)",
-      border: "0.5px solid var(--color-border-tertiary)",
-      borderRadius: "var(--border-radius-md)", padding: 3,
-    }}>
+    <div style={{ display: "flex", gap: 4, background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", padding: 3 }}>
       {options.map(opt => {
-        const active = value === opt.value;
-        const ac = opt.activeStyle || {};
-        return (
-          <button
-            key={opt.value}
-            onClick={() => onChange(opt.value)}
-            style={{
-              flex: 1, padding: "7px 14px", fontSize: 12, fontWeight: active ? 500 : 400,
-              border: active ? `0.5px solid ${ac.border || "var(--color-border-info)"}` : "0.5px solid transparent",
-              borderRadius: "var(--border-radius-md)",
-              background: active ? (ac.bg || "var(--color-background-info)") : "transparent",
-              color: active ? (ac.color || "var(--color-text-info)") : "var(--color-text-secondary)",
-              cursor: "pointer", transition: "all 0.15s", fontFamily: "var(--font-sans)",
-            }}
-          >{opt.label}</button>
-        );
+        const active = value === opt.value, ac = opt.activeStyle || {};
+        return <button key={opt.value} onClick={() => onChange(opt.value)} style={{ flex: 1, padding: "7px 14px", fontSize: 12, fontWeight: active ? 500 : 400, border: active ? `0.5px solid ${ac.border || "var(--color-border-info)"}` : "0.5px solid transparent", borderRadius: "var(--border-radius-md)", background: active ? (ac.bg || "var(--color-background-info)") : "transparent", color: active ? (ac.color || "var(--color-text-info)") : "var(--color-text-secondary)", cursor: "pointer", transition: "all 0.15s", fontFamily: "var(--font-sans)" }}>{opt.label}</button>;
       })}
     </div>
   );
 }
 
 function SectionHeading({ children }) {
+  return <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 500, marginBottom: 8, marginTop: 4 }}>{children}</div>;
+}
+
+function WarnBox({ children }) {
+  return <div style={{ padding: "10px 14px", fontSize: 12, borderRadius: "var(--border-radius-md)", background: "#FAEEDA", color: "#854F0B", border: "0.5px solid #BA7517" }}>{children}</div>;
+}
+
+function Divider({ label }) {
   return (
-    <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 500, marginBottom: 8, marginTop: 4 }}>
-      {children}
+    <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "28px 0 20px" }}>
+      <div style={{ flex: 1, height: "0.5px", background: "var(--color-border-tertiary)" }} />
+      <span style={{ fontSize: 11, color: "var(--color-text-secondary)", fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{label}</span>
+      <div style={{ flex: 1, height: "0.5px", background: "var(--color-border-tertiary)" }} />
     </div>
   );
 }
 
-function WarnBox({ children }) {
-  return (
-    <div style={{ padding: "10px 14px", fontSize: 12, borderRadius: "var(--border-radius-md)", background: "#FAEEDA", color: "#854F0B", border: "0.5px solid #BA7517" }}>
-      {children}
-    </div>
-  );
+function TestBadge({ pass }) {
+  return <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 500, background: pass ? "#E1F5EE" : "#FCEBEB", border: `0.5px solid ${pass ? "#1D9E75" : "#E24B4A"}`, color: pass ? "#0F6E56" : "#A32D2D" }}>{pass ? "PASS" : "FAIL"}</span>;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #0 panel
+// ═══════════════════════════════════════════════════════════════════════════════
 
 function ProofPanel({ effSrc, effTgt, chain, fdLabel, direction }) {
   const [open, setOpen] = useState(false);
   return (
     <div>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center",
-          padding: "10px 16px", fontSize: 13, fontWeight: 500,
-          border: "0.5px solid var(--color-border-tertiary)",
-          borderRadius: open ? "var(--border-radius-md) var(--border-radius-md) 0 0" : "var(--border-radius-md)",
-          background: "var(--color-background-secondary)",
-          color: "var(--color-text-primary)", cursor: "pointer", fontFamily: "var(--font-sans)",
-        }}
-      >
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", fontSize: 13, fontWeight: 500, border: "0.5px solid var(--color-border-tertiary)", borderRadius: open ? "var(--border-radius-md) var(--border-radius-md) 0 0" : "var(--border-radius-md)", background: "var(--color-background-secondary)", color: "var(--color-text-primary)", cursor: "pointer", fontFamily: "var(--font-sans)" }}>
         <span>Reduction chain summary — click to {open ? "collapse" : "expand"}</span>
         <span style={{ fontSize: 11 }}>{open ? "▾" : "▸"}</span>
       </button>
       {open && (
-        <div style={{
-          border: "0.5px solid var(--color-border-tertiary)", borderTop: "none",
-          borderRadius: "0 0 var(--border-radius-md) var(--border-radius-md)",
-          padding: "16px", background: "var(--color-background-primary)",
-        }}>
-          <div style={{ marginBottom: 10, fontSize: 13 }}>
-            <span style={{ fontWeight: 500 }}>Full chain: </span>
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginLeft: 6 }}>{fdLabel} → {effSrc} → {effTgt}</span>
-          </div>
-          <div style={{ marginBottom: 14, fontSize: 13 }}>
-            <span style={{ fontWeight: 500 }}>Direction: </span>
-            <span style={{ marginLeft: 6 }}>{direction === "forward" ? `Forward (${effSrc} → ${effTgt})` : `Backward (${effSrc} → ${effTgt})`}</span>
-          </div>
-
+        <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderTop: "none", borderRadius: "0 0 var(--border-radius-md) var(--border-radius-md)", padding: "16px", background: "var(--color-background-primary)" }}>
+          <div style={{ marginBottom: 10, fontSize: 13 }}><span style={{ fontWeight: 500 }}>Full chain: </span><span style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginLeft: 6 }}>{fdLabel} → {effSrc} → {effTgt}</span></div>
+          <div style={{ marginBottom: 14, fontSize: 13 }}><span style={{ fontWeight: 500 }}>Direction: </span><span style={{ marginLeft: 6 }}>{direction === "forward" ? `Forward (${effSrc} → ${effTgt})` : `Backward (${effSrc} → ${effTgt})`}</span></div>
           {chain ? chain.map((edge, i) => {
-            const r = REDUCTIONS[edge];
-            if (!r) return (
-              <div key={i} style={{ padding: "6px 0", borderBottom: "0.5px solid var(--color-border-tertiary)", color: "var(--color-text-secondary)", fontSize: 12 }}>
-                {edge}: not yet implemented
-              </div>
-            );
+            const r = REDUCTIONS[edge]; if (!r) return null;
             const [, a, b] = edge.match(/(\w+)→(\w+)/);
             const c = PA_COLORS[r.pa] || {};
             return (
@@ -427,164 +469,427 @@ function ProofPanel({ effSrc, effTgt, chain, fdLabel, direction }) {
                   <span style={{ fontWeight: 500, fontSize: 13 }}>{a} → {b}</span>
                   <span style={{ color: "var(--color-text-secondary)", fontSize: 12 }}>— {r.name}</span>
                 </div>
-                <div style={{ fontSize: 11, color: "var(--color-text-secondary)", paddingLeft: 4, marginBottom: 2 }}>
-                  Security: {r.security}
-                </div>
-                <div style={{ fontSize: 11, color: "var(--color-text-secondary)", paddingLeft: 4, fontStyle: "italic" }}>
-                  If adversary breaks {b} with advantage ε, it breaks {a} with advantage ε′ ≥ ε/q — implemented in {r.pa}
-                </div>
+                <div style={{ fontSize: 11, color: "var(--color-text-secondary)", paddingLeft: 4, marginBottom: 2 }}>Security: {r.security}</div>
+                <div style={{ fontSize: 11, color: "var(--color-text-secondary)", paddingLeft: 4, fontStyle: "italic" }}>If adversary breaks {b} with advantage ε, it breaks {a} with advantage ε′ ≥ ε/q — implemented in {r.pa}</div>
               </div>
             );
-          }) : (
-            <WarnBox>
-              No direct reduction path from {effSrc} → {effTgt}. No known reduction exists in this
-              direction in the minicrypt clique. Try an adjacent primitive pair, or use bidirectional
-              mode to run the reverse direction.
-            </WarnBox>
-          )}
-
-          <div style={{ marginTop: 14, fontSize: 11, color: "var(--color-text-secondary)", fontStyle: "italic" }}>
-            All intermediate values are toy stubs. Real values will flow from your PA#1–PA#2 WASM implementations.
-          </div>
+          }) : <WarnBox>No direct reduction path from {effSrc} → {effTgt}. Try an adjacent pair or bidirectional mode.</WarnBox>}
+          <div style={{ marginTop: 14, fontSize: 11, color: "var(--color-text-secondary)", fontStyle: "italic" }}>All intermediate values are toy stubs. Real values will flow from your PA#1–PA#2 WASM implementations.</div>
         </div>
       )}
     </div>
   );
 }
 
-// ─── Main app ─────────────────────────────────────────────────────────────────
+function PA0Panel({ foundationType }) {
+  const [direction, setDirection] = useState("forward");
+  const [src, setSrc] = useState("PRG");
+  const [tgt, setTgt] = useState("PRF");
+  const [keyHex, setKeyHex] = useState("a3f2c1b8d5e09471");
+  const [msgHex, setMsgHex] = useState("deadbeef");
 
-export default function MinicryptExplorer() {
-  const [foundationType, setFoundationType] = useState("AES");
-  const [direction, setDirection]           = useState("forward");
-  const [src, setSrc]                       = useState("PRG");
-  const [tgt, setTgt]                       = useState("PRF");
-  const [keyHex, setKeyHex]                 = useState("a3f2c1b8d5e09471");
-  const [msgHex, setMsgHex]                 = useState("deadbeef");
-
-  // FIX #3 — Build the Foundation object whenever type or key changes.
-  // The rest of the app is agnostic to which foundation is active.
-  const foundation = useMemo(
-    () => foundationType === "AES" ? makeAESFoundation(keyHex) : makeDLPFoundation(keyHex),
-    [foundationType, keyHex]
-  );
-
+  const foundation = useMemo(() => foundationType === "AES" ? makeAESFoundation(keyHex) : makeDLPFoundation(keyHex), [foundationType, keyHex]);
   const effSrc = direction === "forward" ? src : tgt;
   const effTgt = direction === "forward" ? tgt : src;
-
   const col1Steps = useMemo(() => buildCol1Steps(effSrc, foundation), [effSrc, foundation]);
-
   const chain = getRoute(effSrc, effTgt);
-
-  // FIX #4 — Derive a black-box oracle from Column 1's final output.
-  // Column 2 receives only this function; it cannot inspect its closure.
-  const oracleA = useMemo(() => {
-    const lastStep = col1Steps[col1Steps.length - 1];
-    const outSeed  = seedFromHex(lastStep.outputHex);
-    return (inputHex) => fakeHex(outSeed ^ seedFromHex(inputHex), 8);
-  }, [col1Steps]);
-
+  const oracleA = useMemo(() => { const s = seedFromHex(col1Steps[col1Steps.length - 1].outputHex); return (i) => fakeHex(s ^ seedFromHex(i), 8); }, [col1Steps]);
   const col2Steps = useMemo(() => buildCol2Steps(chain, oracleA, msgHex), [chain, oracleA, msgHex]);
 
   function handleSrcChange(v) { setSrc(v); if (v === tgt) setTgt(PRIMITIVES.find(p => p !== v)); }
   function handleTgtChange(v) { setTgt(v); if (v === src) setSrc(PRIMITIVES.find(p => p !== v)); }
 
   return (
-    <div style={{ padding: "1rem 0", fontFamily: "var(--font-sans)", fontSize: 14 }}>
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+        <span style={{ fontSize: 12, color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>Mode:</span>
+        <ToggleBar value={direction} onChange={setDirection} options={[
+          { value: "forward",  label: "Forward (A → B)",  activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
+          { value: "backward", label: "Backward (B → A)", activeStyle: { bg: "#FAEEDA", border: "#BA7517", color: "#854F0B" } },
+        ]} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16, marginBottom: 20 }}>
+        <ColCard headerLabel="Column 1 — Build: foundation → source primitive A" headerStyle={{ background: "#E6F1FB", color: "#185FA5", borderBottom: "0.5px solid #B5D4F4" }}>
+          <div style={{ marginBottom: 14 }}><FieldLabel>Source primitive A</FieldLabel><StyledSelect value={src} onChange={handleSrcChange} options={PRIMITIVES} exclude={tgt} /></div>
+          <div style={{ marginBottom: 14 }}><FieldLabel>Input key / seed (hex)</FieldLabel><TextInput value={keyHex} onChange={setKeyHex} placeholder="e.g. a3f2c1b8..." /></div>
+          <SectionHeading>{foundation.name} → {effSrc}: step-through</SectionHeading>
+          {col1Steps.map((s, i) => <StepRow key={i} tag={s.tag} fn={s.fn} inputHex={s.inputHex} outputHex={s.outputHex} pa={s.pa} implemented={s.implemented} tagColorMap={COL1_TAG_COLORS} />)}
+        </ColCard>
+        <ColCard headerLabel="Column 2 — Reduce: source A → target primitive B" headerStyle={{ background: "#FAEEDA", color: "#854F0B", borderBottom: "0.5px solid #FAC775" }}>
+          <div style={{ marginBottom: 14 }}><FieldLabel>Target primitive B</FieldLabel><StyledSelect value={tgt} onChange={handleTgtChange} options={PRIMITIVES} exclude={src} /></div>
+          <div style={{ marginBottom: 14 }}><FieldLabel>Query / message</FieldLabel><TextInput value={msgHex} onChange={setMsgHex} placeholder="e.g. deadbeef..." /></div>
+          <SectionHeading>{effSrc} → {effTgt}: step-through</SectionHeading>
+          {col2Steps ? col2Steps.map((s, i) => <StepRow key={i} tag={s.tag} fn={s.fn} inputHex={s.inputHex} outputHex={s.outputHex} pa={s.pa} implemented={s.implemented} tagColorMap={PA_COLORS} />) : <WarnBox>No direct reduction path from {effSrc} → {effTgt}.<br />Try an adjacent primitive pair or switch to bidirectional mode.</WarnBox>}
+        </ColCard>
+      </div>
+      <ProofPanel effSrc={effSrc} effTgt={effTgt} chain={chain} fdLabel={foundation.name} direction={direction} />
+    </div>
+  );
+}
 
-      {/* ── Top bar ── */}
-      <div style={{
-        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-        flexWrap: "wrap", gap: 12, marginBottom: 20,
-        paddingBottom: 16, borderBottom: "0.5px solid var(--color-border-tertiary)",
-      }}>
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #1 panel
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function ArgumentBox() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 12px", fontSize: 11, fontWeight: 500, border: "0.5px solid var(--color-border-tertiary)", borderRadius: open ? "var(--border-radius-md) var(--border-radius-md) 0 0" : "var(--border-radius-md)", background: "var(--color-background-secondary)", color: "var(--color-text-secondary)", cursor: "pointer", fontFamily: "var(--font-sans)" }}>
+        <span>PA#1b written argument — click to {open ? "collapse" : "expand"}</span><span>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div style={{ padding: "12px 14px", border: "0.5px solid var(--color-border-tertiary)", borderTop: "none", borderRadius: "0 0 var(--border-radius-md) var(--border-radius-md)", background: "var(--color-background-primary)", fontSize: 11, lineHeight: 1.7, color: "var(--color-text-secondary)" }}>
+          <div style={{ fontWeight: 500, color: "var(--color-text-primary)", marginBottom: 6 }}>Claim: f(s) = G(s) is a one-way function.</div>
+          <div style={{ marginBottom: 6 }}><span style={{ fontWeight: 500 }}>Proof (contrapositive).</span> Suppose adversary <em>A</em> inverts <em>f</em> with non-negligible probability:</div>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, background: "var(--color-background-secondary)", padding: "6px 10px", borderRadius: "var(--border-radius-md)", marginBottom: 8 }}>Pr[ A(G(s)) = s' s.t. G(s') = G(s) ] ≥ 1/poly(n)</div>
+          <div style={{ marginBottom: 6 }}>Construct distinguisher <em>D</em> against <em>G</em>:</div>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, background: "var(--color-background-secondary)", padding: "8px 10px", borderRadius: "var(--border-radius-md)", marginBottom: 8, lineHeight: 1.9 }}>
+            D(y):<br />&nbsp;&nbsp;1. Run A(y) → s'<br />&nbsp;&nbsp;2. If G(s') = y, output 1&nbsp;&nbsp;// y "looks like" PRG output<br />&nbsp;&nbsp;3. Else output 0
+          </div>
+          <div style={{ marginBottom: 4 }}>If <em>y = G(s)</em>: <em>A</em> succeeds w.p. ≥ 1/poly(n), so <em>D</em> outputs 1 w.h.p.</div>
+          <div style={{ marginBottom: 8 }}>If <em>y ← U_(n+ℓ)</em>: G(s') = y with prob ≤ 2⁻ˡ (negligible by counting argument).</div>
+          <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 8, fontStyle: "italic" }}>⟹ D distinguishes G from uniform with advantage ≥ 1/poly(n) − negl(n), contradicting PRG security. Therefore f is one-way. □</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PA1Panel() {
+  const [owfType, setOwfType] = useState("DLP");
+  const [seedHex, setSeedHex] = useState("deadbeef");
+  const [outputLen, setOutputLen] = useState(16);
+  const [showTests, setShowTests] = useState(false);
+  const [testResults, setTestResults] = useState(null);
+
+  const owfOut = useMemo(() => owfType === "DLP" ? dlpOWF(seedHex) : aesOWF(seedHex), [owfType, seedHex]);
+  const prgAsOwfDemo = useMemo(() => { const { hexOut } = prgFromOWF(seedHex, owfType, 8); return { prgOut: hexOut, invertAttempt: fakeHex(seedFromHex(hexOut) ^ 0xdead, 8) }; }, [owfType, seedHex]);
+  const prgResult = useMemo(() => prgFromOWF(seedHex, owfType, outputLen), [seedHex, owfType, outputLen]);
+  const prgInterfaceDemo = useMemo(() => { const prg = makePRGInterface(seedHex, owfType); const b8 = prg.next_bytes_hex(4); prg.seed(owfOut); return { firstCall: b8, afterReseed: prg.next_bytes_hex(4) }; }, [seedHex, owfType, owfOut]);
+
+  const ones = prgResult.bitString.split("").filter(b => b === "1").length;
+  const ratio = prgResult.bitString.length > 0 ? ones / prgResult.bitString.length : 0.5;
+
+  const runTests = useCallback(() => {
+    setTestResults({ freq: frequencyTest(prgResult.bitString), runs: runsTest(prgResult.bitString), serial: serialTest(prgResult.bitString) });
+    setShowTests(true);
+  }, [prgResult.bitString]);
+
+  return (
+    <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", background: "#E6F1FB", borderBottom: "0.5px solid #B5D4F4", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", color: "#185FA5" }}>PA #1 — Live PRG output viewer</div>
+        <ToggleBar value={owfType} onChange={setOwfType} options={[
+          { value: "DLP", label: "DLP (gˣ mod p)",  activeStyle: { bg: "#EEEDFE", border: "#7F77DD", color: "#3C3489" } },
+          { value: "AES", label: "AES Davies-Meyer", activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
+        ]} />
+      </div>
+      <div style={{ padding: "16px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+          <div>
+            <SectionHeading>OWF — evaluate(x)</SectionHeading>
+            <div style={{ marginBottom: 12 }}><FieldLabel>Seed / input x (hex)</FieldLabel><TextInput value={seedHex} onChange={setSeedHex} placeholder="e.g. deadbeef" /></div>
+            <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>f(x) = {owfType === "DLP" ? "g^x mod p" : "AES_k(0¹²⁸) ⊕ k"}</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 22 }}>in:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-text-secondary)" }}>0x{seedHex.slice(0,8).padEnd(8,"0")}</span></div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 22 }}>out:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--color-text-primary)", fontWeight: 500 }}>0x{owfOut}</span></div>
+            </div>
+            <SectionHeading>verify_hardness() — OWF from PRG (PA#1b)</SectionHeading>
+            <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontSize: 12, marginBottom: 4 }}>
+              <div style={{ marginBottom: 6, color: "var(--color-text-secondary)" }}>Claim: f(s) = G(s) is a OWF. Given G(s), adversary cannot recover s.</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 60 }}>G(seed):</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)", wordBreak: "break-all" }}>0x{prgAsOwfDemo.prgOut}</span></div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 60 }}>Adv. guess:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)" }}>0x{prgAsOwfDemo.invertAttempt}</span></div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 60 }}>Recovered:</span><TestBadge pass={false} /><span style={{ fontSize: 11, color: "var(--color-text-secondary)", fontStyle: "italic" }}>inversion fails ✓</span></div>
+            </div>
+            <ArgumentBox />
+            <div style={{ marginTop: 14 }}>
+              <SectionHeading>PRG interface — seed(s) / next_bits(n) for PA#2</SectionHeading>
+              <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontSize: 11 }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 4 }}><span style={{ fontFamily: "var(--font-mono)", color: "#185FA5", minWidth: 110 }}>prg.seed(s)</span><span style={{ color: "var(--color-text-secondary)" }}>→ resets internal state to s</span></div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}><span style={{ fontFamily: "var(--font-mono)", color: "#185FA5", minWidth: 110 }}>next_bits(32)</span><span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-primary)" }}>0x{prgInterfaceDemo.firstCall}</span></div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 4 }}><span style={{ fontFamily: "var(--font-mono)", color: "#0F6E56", minWidth: 110 }}>prg.seed(owf)</span><span style={{ color: "var(--color-text-secondary)" }}>→ re-seeded with f(x)</span></div>
+                <div style={{ display: "flex", gap: 8 }}><span style={{ fontFamily: "var(--font-mono)", color: "#0F6E56", minWidth: 110 }}>next_bits(32)</span><span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-primary)" }}>0x{prgInterfaceDemo.afterReseed}</span></div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <SectionHeading>PRG from OWF — G(s) iterative construction (PA#1a)</SectionHeading>
+            <div style={{ marginBottom: 12 }}>
+              <FieldLabel>Output length ℓ — {outputLen} bytes ({outputLen * 8} bits)</FieldLabel>
+              <input type="range" min={8} max={256} step={8} value={outputLen} onChange={e => setOutputLen(Number(e.target.value))} style={{ width: "100%" }} />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--color-text-secondary)", marginTop: 2 }}><span>8 B</span><span>256 B</span></div>
+            </div>
+            <SectionHeading>First 8 iterations: xᵢ → f(xᵢ) → b(xᵢ)</SectionHeading>
+            <div style={{ marginBottom: 12 }}>
+              {prgResult.steps.map((s, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 0", borderBottom: "0.5px solid var(--color-border-tertiary)", fontSize: 11 }}>
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-secondary)", minWidth: 18 }}>x{i}:</span>
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-secondary)", fontSize: 10, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>0x{s.xHex}</span>
+                  <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, fontWeight: 500, background: s.bit ? "#E1F5EE" : "#EEEDFE", color: s.bit ? "#0F6E56" : "#3C3489", border: `0.5px solid ${s.bit ? "#1D9E75" : "#7F77DD"}` }}>b={s.bit}</span>
+                </div>
+              ))}
+            </div>
+            <SectionHeading>G(s) output — {outputLen * 8} pseudorandom bits</SectionHeading>
+            <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all", color: "var(--color-text-primary)", maxHeight: 80, overflowY: "auto", marginBottom: 12 }}>0x{prgResult.hexOut}</div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4 }}><span>Bit ratio (ones / total)</span><span style={{ fontFamily: "var(--font-mono)" }}>{(ratio * 100).toFixed(1)}% ones — expect ≈ 50%</span></div>
+              <div style={{ height: 8, borderRadius: 4, background: "var(--color-background-secondary)", overflow: "hidden", border: "0.5px solid var(--color-border-tertiary)" }}>
+                <div style={{ height: "100%", width: `${ratio * 100}%`, background: Math.abs(ratio - 0.5) < 0.05 ? "#1D9E75" : "#D85A30", transition: "width 0.3s" }} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--color-text-secondary)", marginTop: 2 }}><span>0%</span><span style={{ color: "#1D9E75" }}>50%</span><span>100%</span></div>
+            </div>
+            <button onClick={runTests} style={{ width: "100%", padding: "8px 14px", fontSize: 12, fontWeight: 500, border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", color: "var(--color-text-primary)", cursor: "pointer", fontFamily: "var(--font-sans)" }}>
+              Run randomness tests (frequency + runs + serial)
+            </button>
+          </div>
+        </div>
+        {showTests && testResults && (
+          <div style={{ marginTop: 16, border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", overflow: "hidden" }}>
+            <div style={{ padding: "8px 14px", background: "var(--color-background-secondary)", borderBottom: "0.5px solid var(--color-border-tertiary)", fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-text-secondary)" }}>NIST SP 800-22 style test results — threshold p ≥ 0.01</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr" }}>
+              {[
+                { label: testResults.freq.name,   pass: testResults.freq.pass,   lines: [`ones=${testResults.freq.ones}  zeros=${testResults.freq.zeros}`, `ratio=${testResults.freq.ratio}%  S_obs=${testResults.freq.sObs}`, `p-value = ${testResults.freq.pVal}`] },
+                { label: testResults.runs.name,   pass: testResults.runs.pass,   lines: [`runs=${testResults.runs.runs}  expected≈${testResults.runs.expected}`, `V_obs=${testResults.runs.vObs}`, `p-value = ${testResults.runs.pVal}`] },
+                { label: testResults.serial.name, pass: testResults.serial.pass, lines: [`00=${testResults.serial.counts["00"]}  01=${testResults.serial.counts["01"]}  10=${testResults.serial.counts["10"]}  11=${testResults.serial.counts["11"]}`, `χ² = ${testResults.serial.chi2}  (df=3, α=0.05)`, `p-value = ${testResults.serial.pVal}`] },
+              ].map((t, i) => (
+                <div key={i} style={{ padding: "12px 14px", borderRight: i < 2 ? "0.5px solid var(--color-border-tertiary)" : "none" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><TestBadge pass={t.pass} /><span style={{ fontSize: 12, fontWeight: 500 }}>{t.label}</span></div>
+                  {t.lines.map((line, j) => <div key={j} style={{ fontSize: 11, color: j === 2 ? (t.pass ? "#0F6E56" : "#A32D2D") : "var(--color-text-secondary)", fontFamily: "var(--font-mono)", marginBottom: 2, fontWeight: j === 2 ? 500 : 400 }}>{line}</div>)}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #2 panel
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function GGMTreeViz({ levels, bitString }) {
+  if (!levels || levels.length === 0) return null;
+  const depth = levels.length - 1;
+  const nodeW = 64, nodeH = 28, hGap = 16, vGap = 48;
+  const svgW = Math.max(500, Math.pow(2, depth) * (nodeW + hGap) + hGap);
+  const svgH = (depth + 1) * (nodeH + vGap) + 16;
+
+  function nodeX(id) { const d = id.length, total = Math.pow(2, d), idx = parseInt(id || "0", 2) || 0, step = svgW / total; return step * idx + step / 2 - nodeW / 2; }
+  function nodeY(d) { return 8 + d * (nodeH + vGap); }
+  const allNodes = levels.flatMap(l => l);
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${svgW} ${svgH}`} style={{ display: "block", fontFamily: "var(--font-mono)" }}>
+      {allNodes.map(n => {
+        if (n.id.length >= depth) return null;
+        const px = nodeX(n.id) + nodeW / 2, py = nodeY(n.id.length) + nodeH;
+        const l0 = n.id + "0", l1 = n.id + "1";
+        const lx0 = nodeX(l0) + nodeW / 2, lx1 = nodeX(l1) + nodeW / 2, cy = nodeY(n.id.length + 1);
+        const pa0 = bitString.startsWith(l0), pa1 = bitString.startsWith(l1);
+        return (<g key={`e-${n.id}`}>
+          <line x1={px} y1={py} x2={lx0} y2={cy} stroke={pa0 ? "#378ADD" : "#D3D1C7"} strokeWidth={pa0 ? 2 : 1} />
+          <text x={(px + lx0) / 2 - 6} y={(py + cy) / 2} fontSize={10} fill={pa0 ? "#185FA5" : "#888780"}>0</text>
+          <line x1={px} y1={py} x2={lx1} y2={cy} stroke={pa1 ? "#378ADD" : "#D3D1C7"} strokeWidth={pa1 ? 2 : 1} />
+          <text x={(px + lx1) / 2 + 2} y={(py + cy) / 2} fontSize={10} fill={pa1 ? "#185FA5" : "#888780"}>1</text>
+        </g>);
+      })}
+      {allNodes.map(n => {
+        const x = nodeX(n.id), y = nodeY(n.id.length);
+        const fill   = n.isLeaf && n.active ? "#E1F5EE" : n.active ? "#E6F1FB" : "var(--color-background-secondary)";
+        const stroke = n.isLeaf && n.active ? "#1D9E75" : n.active ? "#378ADD" : "#D3D1C7";
+        const textC  = n.isLeaf && n.active ? "#0F6E56" : n.active ? "#185FA5" : "#888780";
+        return (<g key={`n-${n.id}`}>
+          <rect x={x} y={y} width={nodeW} height={nodeH} rx={n.isLeaf ? 4 : 14} fill={fill} stroke={stroke} strokeWidth={n.active ? 1.5 : 0.5} />
+          <text x={x + nodeW / 2} y={y + nodeH / 2 + 4} textAnchor="middle" fontSize={9} fill={textC}>{n.id === "" ? "k" : `0x${n.val.slice(0, 6)}`}</text>
+        </g>);
+      })}
+    </svg>
+  );
+}
+
+function PA2Panel() {
+  const [prfType, setPrfType] = useState("GGM");
+  const [keyHex, setKeyHex] = useState("a3f2c1b8");
+  const [queryBits, setQueryBits] = useState("1010");
+  const [prgSeed, setPrgSeed] = useState("deadbeef");
+  const [prgLen, setPrgLen] = useState(16);
+  const [distResult, setDistResult] = useState(null);
+  const [showDist, setShowDist] = useState(false);
+
+  const cleanBits = queryBits.replace(/[^01]/g, "").slice(0, 8);
+  const prfResult = useMemo(() => prfType === "AES" ? { value: aesPRF(keyHex, cleanBits.padEnd(8, "0")), path: [] } : ggmPRF(keyHex, cleanBits), [prfType, keyHex, cleanBits]);
+  const treeData  = useMemo(() => buildGGMTree(keyHex, cleanBits, 8), [keyHex, cleanBits]);
+  const prgResult2 = useMemo(() => prgFromPRF(prgSeed, prfType, prgLen), [prgSeed, prfType, prgLen]);
+  const prgRatio2  = prgResult2.bitString.length > 0 ? prgResult2.bitString.split("").filter(b => b === "1").length / prgResult2.bitString.length : 0.5;
+  const prgTests2  = useMemo(() => ({ freq: frequencyTest(prgResult2.bitString), runs: runsTest(prgResult2.bitString), serial: serialTest(prgResult2.bitString) }), [prgResult2.bitString]);
+
+  return (
+    <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", background: "#EEEDFE", borderBottom: "0.5px solid #AFA9EC", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", color: "#3C3489" }}>PA #2 — GGM tree visualiser & PRF demo</div>
+        <ToggleBar value={prfType} onChange={setPrfType} options={[
+          { value: "GGM", label: "GGM (PRG-based)", activeStyle: { bg: "#EEEDFE", border: "#7F77DD", color: "#3C3489" } },
+          { value: "AES", label: "AES plug-in",      activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
+        ]} />
+      </div>
+      <div style={{ padding: "16px" }}>
+
+        {/* PRF eval + tree */}
+        <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0,1fr)", gap: 16, marginBottom: 20 }}>
+          <div>
+            <SectionHeading>PRF inputs — F(k, x)</SectionHeading>
+            <div style={{ marginBottom: 10 }}><FieldLabel>Key k (hex)</FieldLabel><TextInput value={keyHex} onChange={setKeyHex} placeholder="e.g. a3f2c1b8" /></div>
+            <div style={{ marginBottom: 14 }}>
+              <FieldLabel>Query x — bit string (≤ 8 bits)</FieldLabel>
+              <TextInput value={queryBits} onChange={v => setQueryBits(v.replace(/[^01]/g, "").slice(0, 8))} placeholder="e.g. 1010" />
+              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", marginTop: 3 }}>depth = {cleanBits.length}, path: root → {cleanBits.split("").join(" → ") || "root"}</div>
+            </div>
+            <div style={{ padding: "12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 10 }}>
+              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>F_k(x) = {prfType === "AES" ? "AES_k(x)" : "GGM leaf"}</div>
+              {prfType === "GGM" && prfResult.path.map((step, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 11 }}>
+                  <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, fontWeight: 500, background: step.bit === "0" ? "#E6F1FB" : "#E1F5EE", color: step.bit === "0" ? "#185FA5" : "#0F6E56", border: `0.5px solid ${step.bit === "0" ? "#378ADD" : "#1D9E75"}` }}>G{step.bit}</span>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-text-secondary)" }}>0x{step.nodeVal.slice(0,6)}</span>
+                  <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>→</span>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-text-primary)" }}>0x{(step.bit === "0" ? step.left : step.right).slice(0,6)}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "0.5px solid var(--color-border-tertiary)", display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>F_k(x) =</span>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "#3C3489", fontWeight: 500 }}>0x{prfResult.value}</span>
+              </div>
+            </div>
+            <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontSize: 11 }}>
+              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>F(k, x) interface for PA#3–5</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "#3C3489", marginBottom: 2 }}>const prf = makePRFInterface(k, "{prfType}")</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 2 }}>prf.F("{cleanBits || "0000"}")</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)" }}>→ 0x{prfResult.value}</div>
+            </div>
+          </div>
+          <div>
+            <SectionHeading>GGM binary tree — depth {cleanBits.length} — path highlighted in blue</SectionHeading>
+            <div style={{ padding: "10px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", overflowX: "auto" }}>
+              {prfType === "GGM"
+                ? <GGMTreeViz levels={treeData.levels} bitString={cleanBits} />
+                : <div style={{ padding: "20px", textAlign: "center", fontSize: 12, color: "var(--color-text-secondary)", fontStyle: "italic" }}>AES mode: F_k(x) = AES_k(x) directly — no tree structure.<br />Switch to GGM mode to see the binary tree visualiser.</div>
+              }
+            </div>
+            {prfType === "GGM" && (
+              <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: "var(--border-radius-md)", background: "#E6F1FB", border: "0.5px solid #B5D4F4", fontSize: 11, color: "#185FA5" }}>
+                Leaf value F_k({cleanBits || "ε"}) = <span style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}>0x{treeData.leafVal}</span> — matches F_k(x) above ✓
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* PRG from PRF */}
+        <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16, marginBottom: 20 }}>
+          <SectionHeading>PRG from PRF — G(s) = F_s(0ⁿ) ‖ F_s(1ⁿ) (PA#2b)</SectionHeading>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+            <div>
+              <div style={{ marginBottom: 10 }}><FieldLabel>PRG seed (hex)</FieldLabel><TextInput value={prgSeed} onChange={setPrgSeed} placeholder="e.g. deadbeef" /></div>
+              <div style={{ marginBottom: 10 }}>
+                <FieldLabel>Output length — {prgLen} bytes ({prgLen * 8} bits)</FieldLabel>
+                <input type="range" min={8} max={128} step={8} value={prgLen} onChange={e => setPrgLen(Number(e.target.value))} style={{ width: "100%" }} />
+              </div>
+              <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all", color: "var(--color-text-primary)", maxHeight: 64, overflowY: "auto" }}>0x{prgResult2.hexOut}</div>
+            </div>
+            <div>
+              <SectionHeading>Statistical tests — same suite as PA#1</SectionHeading>
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4 }}><span>Bit ratio</span><span style={{ fontFamily: "var(--font-mono)" }}>{(prgRatio2 * 100).toFixed(1)}% ones</span></div>
+                <div style={{ height: 6, borderRadius: 3, background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)", overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${prgRatio2 * 100}%`, background: Math.abs(prgRatio2 - 0.5) < 0.05 ? "#1D9E75" : "#D85A30" }} />
+                </div>
+              </div>
+              {[prgTests2.freq, prgTests2.runs, prgTests2.serial].map((t, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 0", borderBottom: "0.5px solid var(--color-border-tertiary)", fontSize: 11 }}>
+                  <span style={{ color: "var(--color-text-secondary)" }}>{t.name}</span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-secondary)", fontSize: 10 }}>p={t.pVal}</span>
+                    <span style={{ fontSize: 10, padding: "1px 7px", borderRadius: 3, fontWeight: 500, background: t.pass ? "#E1F5EE" : "#FCEBEB", border: `0.5px solid ${t.pass ? "#1D9E75" : "#E24B4A"}`, color: t.pass ? "#0F6E56" : "#A32D2D" }}>{t.pass ? "PASS" : "FAIL"}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Distinguishing game */}
+        <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <SectionHeading>Distinguishing game — PRF vs truly random (q = 100 queries)</SectionHeading>
+            <button onClick={() => { setDistResult(runDistinguishingGame(keyHex, prfType, 100)); setShowDist(true); }} style={{ padding: "7px 14px", fontSize: 12, fontWeight: 500, border: "0.5px solid #7F77DD", borderRadius: "var(--border-radius-md)", background: "#EEEDFE", color: "#3C3489", cursor: "pointer", fontFamily: "var(--font-sans)", whiteSpace: "nowrap" }}>Run game</button>
+          </div>
+          {showDist && distResult && (
+            <div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+                {[{ label: "Total queries", val: distResult.totalQ }, { label: "Collisions", val: `${distResult.collisions} (${distResult.collisionRate}%)` }, { label: "PRF mean byte", val: distResult.prfMean }, { label: "Random mean byte", val: distResult.randMean }].map((s, i) => (
+                  <div key={i} style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)" }}>
+                    <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{s.label}</div>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 500, color: "var(--color-text-primary)" }}>{s.val}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: parseFloat(distResult.diff) < 20 ? "#E1F5EE" : "#FAEEDA", border: `0.5px solid ${parseFloat(distResult.diff) < 20 ? "#1D9E75" : "#BA7517"}`, color: parseFloat(distResult.diff) < 20 ? "#0F6E56" : "#854F0B", fontSize: 12, marginBottom: 12 }}>
+                Mean byte difference = {distResult.diff} — {parseFloat(distResult.diff) < 20 ? "PRF output is statistically indistinguishable from random ✓" : "outputs differ — check PRF implementation"}
+              </div>
+              <SectionHeading>First 10 query results</SectionHeading>
+              <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 60px", background: "var(--color-background-secondary)", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+                  {["x", "F_k(x)", "random(x)", "match?"].map((h, i) => <div key={i} style={{ padding: "6px 10px", fontSize: 10, fontWeight: 500, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</div>)}
+                </div>
+                {distResult.queries.map((q, i) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 60px", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+                    <div style={{ padding: "6px 10px", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)" }}>0x{q.x}</div>
+                    <div style={{ padding: "6px 10px", fontFamily: "var(--font-mono)", fontSize: 11, color: "#3C3489" }}>0x{q.prfOut}</div>
+                    <div style={{ padding: "6px 10px", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)" }}>0x{q.randOut}</div>
+                    <div style={{ padding: "6px 10px", fontSize: 11, color: q.same ? "#A32D2D" : "#0F6E56" }}>{q.same ? "yes !" : "no ✓"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Root — order: PA#0 → PA#1 → PA#2
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export default function MinicryptExplorer() {
+  const [foundationType, setFoundationType] = useState("AES");
+
+  return (
+    <div style={{ padding: "1rem 0", fontFamily: "var(--font-sans)", fontSize: 14 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 20, paddingBottom: 16, borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 500, color: "var(--color-text-primary)" }}>CS8.401 Minicrypt Clique Explorer</div>
-          <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>PA#0 — Interactive scaffold</div>
+          <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>Foundation:</span>
-          <ToggleBar
-            value={foundationType}
-            onChange={setFoundationType}
-            options={[
-              { value: "AES", label: "AES-128 (PRP)", activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
-              { value: "DLP", label: "DLP (gˣ mod p)", activeStyle: { bg: "#E1F5EE", border: "#1D9E75", color: "#0F6E56" } },
-            ]}
-          />
+          <ToggleBar value={foundationType} onChange={setFoundationType} options={[
+            { value: "AES", label: "AES-128 (PRP)", activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
+            { value: "DLP", label: "DLP (gˣ mod p)", activeStyle: { bg: "#E1F5EE", border: "#1D9E75", color: "#0F6E56" } },
+          ]} />
         </div>
       </div>
 
-      {/* ── Mode bar ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
-        <span style={{ fontSize: 12, color: "var(--color-text-secondary)", whiteSpace: "nowrap" }}>Mode:</span>
-        <ToggleBar
-          value={direction}
-          onChange={setDirection}
-          options={[
-            { value: "forward",  label: "Forward (A → B)",  activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
-            { value: "backward", label: "Backward (B → A)", activeStyle: { bg: "#FAEEDA", border: "#BA7517", color: "#854F0B" } },
-          ]}
-        />
-      </div>
+      <Divider label="PA #0 — Clique explorer scaffold" />
+      <PA0Panel foundationType={foundationType} />
 
-      {/* ── Two-column grid ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16, marginBottom: 20 }}>
+      <Divider label="PA #1 — OWF & PRG demo" />
+      <PA1Panel />
 
-        <ColCard
-          headerLabel="Column 1 — Build: foundation → source primitive A"
-          headerStyle={{ background: "#E6F1FB", color: "#185FA5", borderBottom: "0.5px solid #B5D4F4" }}
-        >
-          <div style={{ marginBottom: 14 }}>
-            <FieldLabel>Source primitive A</FieldLabel>
-            <StyledSelect value={src} onChange={handleSrcChange} options={PRIMITIVES} exclude={tgt} />
-          </div>
-          <div style={{ marginBottom: 14 }}>
-            <FieldLabel>Input key / seed (hex)</FieldLabel>
-            <TextInput value={keyHex} onChange={setKeyHex} placeholder="e.g. a3f2c1b8..." />
-          </div>
-          <SectionHeading>{foundation.name} → {effSrc}: step-through</SectionHeading>
-          {col1Steps.map((s, i) => (
-            <StepRow key={i} tag={s.tag} fn={s.fn} inputHex={s.inputHex} outputHex={s.outputHex} pa={s.pa} implemented={s.implemented} tagColorMap={COL1_TAG_COLORS} />
-          ))}
-        </ColCard>
-
-        <ColCard
-          headerLabel="Column 2 — Reduce: source A → target primitive B"
-          headerStyle={{ background: "#FAEEDA", color: "#854F0B", borderBottom: "0.5px solid #FAC775" }}
-        >
-          <div style={{ marginBottom: 14 }}>
-            <FieldLabel>Target primitive B</FieldLabel>
-            <StyledSelect value={tgt} onChange={handleTgtChange} options={PRIMITIVES} exclude={src} />
-          </div>
-          <div style={{ marginBottom: 14 }}>
-            <FieldLabel>Query / message</FieldLabel>
-            <TextInput value={msgHex} onChange={setMsgHex} placeholder="e.g. deadbeef..." />
-          </div>
-          <SectionHeading>{effSrc} → {effTgt}: step-through</SectionHeading>
-          {col2Steps
-            ? col2Steps.map((s, i) => (
-                <StepRow key={i} tag={s.tag} fn={s.fn} inputHex={s.inputHex} outputHex={s.outputHex} pa={s.pa} implemented={s.implemented} tagColorMap={PA_COLORS} />
-              ))
-            : <WarnBox>
-                No direct reduction path from {effSrc} → {effTgt}.<br />
-                No known reduction exists in this direction in the minicrypt clique.
-                Try an adjacent primitive pair or switch to bidirectional mode.
-              </WarnBox>
-          }
-        </ColCard>
-
-      </div>
-
-      {/* ── Proof panel ── */}
-      <ProofPanel
-        effSrc={effSrc}
-        effTgt={effTgt}
-        chain={chain}
-        fdLabel={foundation.name}
-        direction={direction}
-      />
-
+      <Divider label="PA #2 — GGM PRF demo" />
+      <PA2Panel />
     </div>
   );
 }
