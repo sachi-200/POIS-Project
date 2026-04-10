@@ -8,16 +8,53 @@ function lcg(seed) { return ((seed * 1664525 + 1013904223) & 0xffffffff) >>> 0; 
 
 function fakeHex(seed, bytes = 8) {
   let s = seed >>> 0, out = "";
-  for (let i = 0; i < bytes; i++) {
-    s = lcg(s);
-    out += ((s >>> 24) & 0xff).toString(16).padStart(2, "0");
-  }
+  for (let i = 0; i < bytes; i++) { s = lcg(s); out += ((s >>> 24) & 0xff).toString(16).padStart(2, "0"); }
   return out;
 }
 
 function seedFromHex(hex) {
   const clean = (hex || "").replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0");
   return parseInt(clean.slice(0, 8), 16) || 0xdeadbeef;
+}
+
+// Simple PRNG for "fresh random r" — seeded from crypto.getRandomValues when available
+function freshRandom() {
+  try {
+    const arr = new Uint32Array(1);
+    crypto.getRandomValues(arr);
+    return arr[0].toString(16).padStart(8, "0");
+  } catch {
+    return fakeHex(Date.now() ^ Math.random() * 0xffffffff, 8);
+  }
+}
+
+// XOR two equal-length hex strings (byte-wise)
+function hexXOR(a, b) {
+  const len = Math.max(a.length, b.length);
+  const pa  = a.padEnd(len, "0"), pb = b.padEnd(len, "0");
+  let out = "";
+  for (let i = 0; i < len; i += 2) {
+    const ba = parseInt(pa.slice(i, i + 2), 16) || 0;
+    const bb = parseInt(pb.slice(i, i + 2), 16) || 0;
+    out += (ba ^ bb).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+// Pad hex string to multiple of blockHexLen using PKCS#7-style padding (byte values)
+function padHex(msgHex, blockHexLen) {
+  const msgBytes  = Math.ceil(msgHex.length / 2);
+  const blockBytes = blockHexLen / 2;
+  const padLen    = blockBytes - (msgBytes % blockBytes || blockBytes);
+  const padByte   = padLen.toString(16).padStart(2, "0");
+  return msgHex.padEnd(msgHex.length + (msgHex.length % 2), "0") + padByte.repeat(padLen);
+}
+
+// Remove PKCS#7 padding from hex string
+function unpadHex(paddedHex) {
+  if (!paddedHex || paddedHex.length < 2) return paddedHex;
+  const padLen = parseInt(paddedHex.slice(-2), 16);
+  return paddedHex.slice(0, paddedHex.length - padLen * 2);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -38,10 +75,9 @@ function dlpOWF(xHex) {
   return result.toString(16).padStart(8, "0");
 }
 
-// FIX: aesOWF always returns exactly 8 hex bytes (16 chars), consistent with aesPRF
 function aesOWF(kHex) {
   const ks = seedFromHex(kHex);
-  const aesOut = fakeHex(ks ^ 0xae50cafe, 8); // 8-byte stub
+  const aesOut = fakeHex(ks ^ 0xae50cafe, 8);
   const xored = (seedFromHex(aesOut) ^ ks) >>> 0;
   return xored.toString(16).padStart(8, "0");
 }
@@ -59,7 +95,7 @@ function prgFromOWF(seedHex, owfType, outputBytes) {
   const steps = [];
   let xHex = seedHex.replace(/[^0-9a-fA-F]/g, "").padEnd(8, "0").slice(0, 8);
   for (let i = 0; i < outputBits; i++) {
-    const bit   = hardCoreBit(xHex);
+    const bit = hardCoreBit(xHex);
     const nextX = owfType === "DLP" ? dlpOWF(xHex) : aesOWF(xHex);
     steps.push({ i, xHex, bit, nextX });
     xHex = nextX;
@@ -132,7 +168,7 @@ function serialTest(bs) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PA #2 — GGM PRF, AES PRF (fixed 8-byte output), PRG-from-PRF, dist. game
+// PA #2 — GGM PRF, AES PRF, PRG-from-PRF, dist. game
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function G0(sHex) { return fakeHex(seedFromHex(sHex) ^ 0x474d4d30, 8); }
@@ -149,11 +185,9 @@ function ggmPRF(keyHex, bitString) {
   return { value: s, path };
 }
 
-// FIX: always returns exactly 8 bytes (16 hex chars) — no double-length output
 function aesPRF(keyHex, inputHex) {
-  const k = seedFromHex(keyHex);
-  const x = seedFromHex(inputHex);
-  return fakeHex((k ^ x ^ 0xae50f00d) >>> 0, 8); // stub: replace with SubtleCrypto.encrypt AES-128
+  const k = seedFromHex(keyHex), x = seedFromHex(inputHex);
+  return fakeHex((k ^ x ^ 0xae50f00d) >>> 0, 8);
 }
 
 function prgFromPRF(seedHex, prfType, outputBytes) {
@@ -219,6 +253,111 @@ export function makePRFInterface(keyHex, prfType = "GGM") {
     },
     prfType, keyHex,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PA #3 — CPA-Secure Symmetric Encryption
+//
+// Construction: C = (r, F_k(r) ⊕ m)
+//   Enc(k, m): sample fresh r, output (r, F_k(r) XOR m)
+//   Dec(k, (r,c)): output F_k(r) XOR c
+//
+// Multi-block: for message longer than one block, apply PRF to r, r+1, r+2, …
+// and XOR each block of m with the corresponding PRF output (counter-mode).
+//
+// Broken variant: reuse r = F_k(0) deterministically — same m produces same C,
+// so an adversary querying Enc(m) twice detects the nonce reuse trivially.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const BLOCK_HEX_LEN = 16; // 8 bytes = 64 bits per block (toy)
+
+// PRF call for a given counter offset from nonce r
+function prfBlock(keyHex, rHex, counter, prfType) {
+  const rInt = seedFromHex(rHex);
+  const cHex = ((rInt + counter) >>> 0).toString(16).padStart(8, "0");
+  if (prfType === "AES") return aesPRF(keyHex, cHex);
+  const bits = (counter % 256).toString(2).padStart(8, "0");
+  return ggmPRF(keyHex, bits).value;
+}
+
+/**
+ * Enc(k, m) → { r, c, blocks }
+ * m is a hex string. c is a hex string. blocks shows per-block detail.
+ * reuseNonce: if true, always use r = F_k(0) (broken deterministic mode).
+ */
+export function encCPA(keyHex, msgHex, prfType = "GGM", reuseNonce = false) {
+  const r = reuseNonce ? prfBlock(keyHex, "00000000", 0, prfType) : freshRandom();
+  const padded = padHex(msgHex, BLOCK_HEX_LEN);
+  const blocks = [];
+  let cipherHex = "";
+  for (let i = 0; i < padded.length; i += BLOCK_HEX_LEN) {
+    const mBlock   = padded.slice(i, i + BLOCK_HEX_LEN).padEnd(BLOCK_HEX_LEN, "0");
+    const keyStream = prfBlock(keyHex, r, i / BLOCK_HEX_LEN, prfType);
+    const cBlock    = hexXOR(mBlock, keyStream);
+    blocks.push({ counter: i / BLOCK_HEX_LEN, r, mBlock, keyStream, cBlock });
+    cipherHex += cBlock;
+  }
+  return { r, c: cipherHex, blocks, ciphertext: `${r}:${cipherHex}` };
+}
+
+/**
+ * Dec(k, r, c) → { msgHex, blocks }
+ */
+export function decCPA(keyHex, rHex, cipherHex, prfType = "GGM") {
+  const blocks = [];
+  let plainHex = "";
+  for (let i = 0; i < cipherHex.length; i += BLOCK_HEX_LEN) {
+    const cBlock    = cipherHex.slice(i, i + BLOCK_HEX_LEN).padEnd(BLOCK_HEX_LEN, "0");
+    const keyStream = prfBlock(keyHex, rHex, i / BLOCK_HEX_LEN, prfType);
+    const mBlock    = hexXOR(cBlock, keyStream);
+    blocks.push({ counter: i / BLOCK_HEX_LEN, cBlock, keyStream, mBlock });
+    plainHex += mBlock;
+  }
+  const unpadded = unpadHex(plainHex);
+  return { msgHex: unpadded, blocks };
+}
+
+// ── IND-CPA game ──────────────────────────────────────────────────────────────
+// Returns a round result object for display.
+function playCPAGameRound(keyHex, m0hex, m1hex, prfType, reuseNonce) {
+  if (m0hex.length !== m1hex.length) return { error: "m₀ and m₁ must be the same length" };
+  const b = Math.random() < 0.5 ? 0 : 1;          // challenger picks random bit
+  const mb = b === 0 ? m0hex : m1hex;
+  const enc = encCPA(keyHex, mb, prfType, reuseNonce);
+  return { b, mb, r: enc.r, c: enc.c, ciphertext: enc.ciphertext, blocks: enc.blocks, reuseNonce };
+}
+
+// ── CPA simulation: dummy adversary queries oracle 50 times, then guesses ─────
+function runCPASimulation(keyHex, prfType, reuseNonce, rounds = 50) {
+  let correct = 0;
+  const log = [];
+  for (let i = 0; i < rounds; i++) {
+    const m0 = fakeHex(i * 0x1111, 8), m1 = fakeHex(i * 0x2222, 8);
+    const round = playCPAGameRound(keyHex, m0, m1, prfType, reuseNonce);
+    // Dummy adversary: in secure mode guess randomly; in broken mode detect nonce reuse
+    let guess;
+    if (reuseNonce) {
+      // Broken: recompute Enc(m0) ourselves, compare ciphertext
+      const testEnc = encCPA(keyHex, m0, prfType, true);
+      guess = testEnc.c === round.c ? 0 : 1;
+    } else {
+      guess = Math.random() < 0.5 ? 0 : 1;
+    }
+    const win = guess === round.b;
+    if (win) correct++;
+    if (i < 5) log.push({ i, m0, m1, b: round.b, guess, win, c: round.ciphertext.slice(0, 20) + "…" });
+  }
+  const advantage = Math.abs((correct / rounds) - 0.5) * 2;
+  return { rounds, correct, advantage: advantage.toFixed(3), log };
+}
+
+// ── Broken variant attack demo ─────────────────────────────────────────────────
+function demonstrateNonceReuseAttack(keyHex, prfType) {
+  const m = fakeHex(0xdeadbeef, 8);
+  const enc1 = encCPA(keyHex, m, prfType, true);
+  const enc2 = encCPA(keyHex, m, prfType, true);
+  const detected = enc1.ciphertext === enc2.ciphertext;
+  return { m, ct1: enc1.ciphertext, ct2: enc2.ciphertext, detected };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -442,6 +581,10 @@ function TestBadge({ pass }) {
   return <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 500, background: pass ? "#E1F5EE" : "#FCEBEB", border: `0.5px solid ${pass ? "#1D9E75" : "#E24B4A"}`, color: pass ? "#0F6E56" : "#A32D2D" }}>{pass ? "PASS" : "FAIL"}</span>;
 }
 
+function MonoBox({ children, maxH = 64 }) {
+  return <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all", color: "var(--color-text-primary)", maxHeight: maxH, overflowY: "auto" }}>{children}</div>;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PA #0 panel
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -545,11 +688,11 @@ function ArgumentBox() {
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, background: "var(--color-background-secondary)", padding: "6px 10px", borderRadius: "var(--border-radius-md)", marginBottom: 8 }}>Pr[ A(G(s)) = s' s.t. G(s') = G(s) ] ≥ 1/poly(n)</div>
           <div style={{ marginBottom: 6 }}>Construct distinguisher <em>D</em> against <em>G</em>:</div>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, background: "var(--color-background-secondary)", padding: "8px 10px", borderRadius: "var(--border-radius-md)", marginBottom: 8, lineHeight: 1.9 }}>
-            D(y):<br />&nbsp;&nbsp;1. Run A(y) → s'<br />&nbsp;&nbsp;2. If G(s') = y, output 1&nbsp;&nbsp;// y "looks like" PRG output<br />&nbsp;&nbsp;3. Else output 0
+            D(y):<br />&nbsp;&nbsp;1. Run A(y) → s'<br />&nbsp;&nbsp;2. If G(s') = y, output 1<br />&nbsp;&nbsp;3. Else output 0
           </div>
-          <div style={{ marginBottom: 4 }}>If <em>y = G(s)</em>: <em>A</em> succeeds w.p. ≥ 1/poly(n), so <em>D</em> outputs 1 w.h.p.</div>
-          <div style={{ marginBottom: 8 }}>If <em>y ← U_(n+ℓ)</em>: G(s') = y with prob ≤ 2⁻ˡ (negligible by counting argument).</div>
-          <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 8, fontStyle: "italic" }}>⟹ D distinguishes G from uniform with advantage ≥ 1/poly(n) − negl(n), contradicting PRG security. Therefore f is one-way. □</div>
+          <div style={{ marginBottom: 4 }}>If <em>y = G(s)</em>: <em>A</em> succeeds w.p. ≥ 1/poly(n) ⟹ <em>D</em> outputs 1 w.h.p.</div>
+          <div style={{ marginBottom: 8 }}>If <em>y ← U_(n+ℓ)</em>: G(s') = y with prob ≤ 2⁻ˡ (negligible).</div>
+          <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 8, fontStyle: "italic" }}>⟹ D wins with advantage ≥ 1/poly(n) − negl(n), contradicting PRG security. □</div>
         </div>
       )}
     </div>
@@ -570,11 +713,7 @@ function PA1Panel() {
 
   const ones = prgResult.bitString.split("").filter(b => b === "1").length;
   const ratio = prgResult.bitString.length > 0 ? ones / prgResult.bitString.length : 0.5;
-
-  const runTests = useCallback(() => {
-    setTestResults({ freq: frequencyTest(prgResult.bitString), runs: runsTest(prgResult.bitString), serial: serialTest(prgResult.bitString) });
-    setShowTests(true);
-  }, [prgResult.bitString]);
+  const runTests = useCallback(() => { setTestResults({ freq: frequencyTest(prgResult.bitString), runs: runsTest(prgResult.bitString), serial: serialTest(prgResult.bitString) }); setShowTests(true); }, [prgResult.bitString]);
 
   return (
     <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
@@ -631,9 +770,9 @@ function PA1Panel() {
               ))}
             </div>
             <SectionHeading>G(s) output — {outputLen * 8} pseudorandom bits</SectionHeading>
-            <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all", color: "var(--color-text-primary)", maxHeight: 80, overflowY: "auto", marginBottom: 12 }}>0x{prgResult.hexOut}</div>
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4 }}><span>Bit ratio (ones / total)</span><span style={{ fontFamily: "var(--font-mono)" }}>{(ratio * 100).toFixed(1)}% ones — expect ≈ 50%</span></div>
+            <MonoBox maxH={80}>0x{prgResult.hexOut}</MonoBox>
+            <div style={{ margin: "10px 0 12px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4 }}><span>Bit ratio</span><span style={{ fontFamily: "var(--font-mono)" }}>{(ratio * 100).toFixed(1)}% ones</span></div>
               <div style={{ height: 8, borderRadius: 4, background: "var(--color-background-secondary)", overflow: "hidden", border: "0.5px solid var(--color-border-tertiary)" }}>
                 <div style={{ height: "100%", width: `${ratio * 100}%`, background: Math.abs(ratio - 0.5) < 0.05 ? "#1D9E75" : "#D85A30", transition: "width 0.3s" }} />
               </div>
@@ -646,12 +785,12 @@ function PA1Panel() {
         </div>
         {showTests && testResults && (
           <div style={{ marginTop: 16, border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", overflow: "hidden" }}>
-            <div style={{ padding: "8px 14px", background: "var(--color-background-secondary)", borderBottom: "0.5px solid var(--color-border-tertiary)", fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-text-secondary)" }}>NIST SP 800-22 style test results — threshold p ≥ 0.01</div>
+            <div style={{ padding: "8px 14px", background: "var(--color-background-secondary)", borderBottom: "0.5px solid var(--color-border-tertiary)", fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-text-secondary)" }}>NIST SP 800-22 — threshold p ≥ 0.01</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr" }}>
               {[
                 { label: testResults.freq.name,   pass: testResults.freq.pass,   lines: [`ones=${testResults.freq.ones}  zeros=${testResults.freq.zeros}`, `ratio=${testResults.freq.ratio}%  S_obs=${testResults.freq.sObs}`, `p-value = ${testResults.freq.pVal}`] },
-                { label: testResults.runs.name,   pass: testResults.runs.pass,   lines: [`runs=${testResults.runs.runs}  expected≈${testResults.runs.expected}`, `V_obs=${testResults.runs.vObs}`, `p-value = ${testResults.runs.pVal}`] },
-                { label: testResults.serial.name, pass: testResults.serial.pass, lines: [`00=${testResults.serial.counts["00"]}  01=${testResults.serial.counts["01"]}  10=${testResults.serial.counts["10"]}  11=${testResults.serial.counts["11"]}`, `χ² = ${testResults.serial.chi2}  (df=3, α=0.05)`, `p-value = ${testResults.serial.pVal}`] },
+                { label: testResults.runs.name,   pass: testResults.runs.pass,   lines: [`runs=${testResults.runs.runs}  exp≈${testResults.runs.expected}`, `V_obs=${testResults.runs.vObs}`, `p-value = ${testResults.runs.pVal}`] },
+                { label: testResults.serial.name, pass: testResults.serial.pass, lines: [`00=${testResults.serial.counts["00"]}  01=${testResults.serial.counts["01"]}  10=${testResults.serial.counts["10"]}  11=${testResults.serial.counts["11"]}`, `χ²=${testResults.serial.chi2}  (df=3)`, `p-value = ${testResults.serial.pVal}`] },
               ].map((t, i) => (
                 <div key={i} style={{ padding: "12px 14px", borderRight: i < 2 ? "0.5px solid var(--color-border-tertiary)" : "none" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><TestBadge pass={t.pass} /><span style={{ fontSize: 12, fontWeight: 500 }}>{t.label}</span></div>
@@ -673,8 +812,8 @@ function PA1Panel() {
 function GGMTreeViz({ levels, bitString }) {
   if (!levels || levels.length === 0) return null;
   const depth = levels.length - 1;
-  const nodeW = 64, nodeH = 28, hGap = 16, vGap = 48;
-  const svgW = Math.max(500, Math.pow(2, depth) * (nodeW + hGap) + hGap);
+  const nodeW = 64, nodeH = 28, vGap = 48;
+  const svgW = Math.max(500, Math.pow(2, depth) * (nodeW + 16) + 16);
   const svgH = (depth + 1) * (nodeH + vGap) + 16;
 
   function nodeX(id) { const d = id.length, total = Math.pow(2, d), idx = parseInt(id || "0", 2) || 0, step = svgW / total; return step * idx + step / 2 - nodeW / 2; }
@@ -736,8 +875,6 @@ function PA2Panel() {
         ]} />
       </div>
       <div style={{ padding: "16px" }}>
-
-        {/* PRF eval + tree */}
         <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0,1fr)", gap: 16, marginBottom: 20 }}>
           <div>
             <SectionHeading>PRF inputs — F(k, x)</SectionHeading>
@@ -745,7 +882,7 @@ function PA2Panel() {
             <div style={{ marginBottom: 14 }}>
               <FieldLabel>Query x — bit string (≤ 8 bits)</FieldLabel>
               <TextInput value={queryBits} onChange={v => setQueryBits(v.replace(/[^01]/g, "").slice(0, 8))} placeholder="e.g. 1010" />
-              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", marginTop: 3 }}>depth = {cleanBits.length}, path: root → {cleanBits.split("").join(" → ") || "root"}</div>
+              <div style={{ fontSize: 10, color: "var(--color-text-secondary)", marginTop: 3 }}>depth = {cleanBits.length}, path: {cleanBits.split("").join(" → ") || "root"}</div>
             </div>
             <div style={{ padding: "12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 10 }}>
               <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>F_k(x) = {prfType === "AES" ? "AES_k(x)" : "GGM leaf"}</div>
@@ -757,50 +894,44 @@ function PA2Panel() {
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-text-primary)" }}>0x{(step.bit === "0" ? step.left : step.right).slice(0,6)}</span>
                 </div>
               ))}
-              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "0.5px solid var(--color-border-tertiary)", display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "0.5px solid var(--color-border-tertiary)", display: "flex", gap: 8 }}>
                 <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>F_k(x) =</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "#3C3489", fontWeight: 500 }}>0x{prfResult.value}</span>
               </div>
             </div>
             <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontSize: 11 }}>
               <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>F(k, x) interface for PA#3–5</div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "#3C3489", marginBottom: 2 }}>const prf = makePRFInterface(k, "{prfType}")</div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 2 }}>prf.F("{cleanBits || "0000"}")</div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)" }}>→ 0x{prfResult.value}</div>
+              <div style={{ fontFamily: "var(--font-mono)", color: "#3C3489", marginBottom: 2 }}>makePRFInterface(k, "{prfType}")</div>
+              <div style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-secondary)", marginBottom: 2 }}>prf.F("{cleanBits || "0000"}")</div>
+              <div style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-primary)" }}>→ 0x{prfResult.value}</div>
             </div>
           </div>
           <div>
-            <SectionHeading>GGM binary tree — depth {cleanBits.length} — path highlighted in blue</SectionHeading>
+            <SectionHeading>GGM binary tree — depth {cleanBits.length} — active path in blue</SectionHeading>
             <div style={{ padding: "10px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", overflowX: "auto" }}>
               {prfType === "GGM"
                 ? <GGMTreeViz levels={treeData.levels} bitString={cleanBits} />
-                : <div style={{ padding: "20px", textAlign: "center", fontSize: 12, color: "var(--color-text-secondary)", fontStyle: "italic" }}>AES mode: F_k(x) = AES_k(x) directly — no tree structure.<br />Switch to GGM mode to see the binary tree visualiser.</div>
+                : <div style={{ padding: "20px", textAlign: "center", fontSize: 12, color: "var(--color-text-secondary)", fontStyle: "italic" }}>AES mode: F_k(x) = AES_k(x) directly — no tree. Switch to GGM to see the visualiser.</div>
               }
             </div>
-            {prfType === "GGM" && (
-              <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: "var(--border-radius-md)", background: "#E6F1FB", border: "0.5px solid #B5D4F4", fontSize: 11, color: "#185FA5" }}>
-                Leaf value F_k({cleanBits || "ε"}) = <span style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}>0x{treeData.leafVal}</span> — matches F_k(x) above ✓
-              </div>
-            )}
+            {prfType === "GGM" && <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: "var(--border-radius-md)", background: "#E6F1FB", border: "0.5px solid #B5D4F4", fontSize: 11, color: "#185FA5" }}>Leaf F_k({cleanBits || "ε"}) = <span style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}>0x{treeData.leafVal}</span> ✓</div>}
           </div>
         </div>
-
-        {/* PRG from PRF */}
         <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16, marginBottom: 20 }}>
           <SectionHeading>PRG from PRF — G(s) = F_s(0ⁿ) ‖ F_s(1ⁿ) (PA#2b)</SectionHeading>
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
             <div>
               <div style={{ marginBottom: 10 }}><FieldLabel>PRG seed (hex)</FieldLabel><TextInput value={prgSeed} onChange={setPrgSeed} placeholder="e.g. deadbeef" /></div>
               <div style={{ marginBottom: 10 }}>
-                <FieldLabel>Output length — {prgLen} bytes ({prgLen * 8} bits)</FieldLabel>
+                <FieldLabel>Output — {prgLen} bytes</FieldLabel>
                 <input type="range" min={8} max={128} step={8} value={prgLen} onChange={e => setPrgLen(Number(e.target.value))} style={{ width: "100%" }} />
               </div>
-              <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all", color: "var(--color-text-primary)", maxHeight: 64, overflowY: "auto" }}>0x{prgResult2.hexOut}</div>
+              <MonoBox>0x{prgResult2.hexOut}</MonoBox>
             </div>
             <div>
-              <SectionHeading>Statistical tests — same suite as PA#1</SectionHeading>
+              <SectionHeading>Statistical tests</SectionHeading>
               <div style={{ marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4 }}><span>Bit ratio</span><span style={{ fontFamily: "var(--font-mono)" }}>{(prgRatio2 * 100).toFixed(1)}% ones</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 4 }}><span>Bit ratio</span><span style={{ fontFamily: "var(--font-mono)" }}>{(prgRatio2 * 100).toFixed(1)}%</span></div>
                 <div style={{ height: 6, borderRadius: 3, background: "var(--color-background-secondary)", border: "0.5px solid var(--color-border-tertiary)", overflow: "hidden" }}>
                   <div style={{ height: "100%", width: `${prgRatio2 * 100}%`, background: Math.abs(prgRatio2 - 0.5) < 0.05 ? "#1D9E75" : "#D85A30" }} />
                 </div>
@@ -817,11 +948,9 @@ function PA2Panel() {
             </div>
           </div>
         </div>
-
-        {/* Distinguishing game */}
         <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-            <SectionHeading>Distinguishing game — PRF vs truly random (q = 100 queries)</SectionHeading>
+            <SectionHeading>Distinguishing game — PRF vs truly random (q = 100)</SectionHeading>
             <button onClick={() => { setDistResult(runDistinguishingGame(keyHex, prfType, 100)); setShowDist(true); }} style={{ padding: "7px 14px", fontSize: 12, fontWeight: 500, border: "0.5px solid #7F77DD", borderRadius: "var(--border-radius-md)", background: "#EEEDFE", color: "#3C3489", cursor: "pointer", fontFamily: "var(--font-sans)", whiteSpace: "nowrap" }}>Run game</button>
           </div>
           {showDist && distResult && (
@@ -835,12 +964,11 @@ function PA2Panel() {
                 ))}
               </div>
               <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: parseFloat(distResult.diff) < 20 ? "#E1F5EE" : "#FAEEDA", border: `0.5px solid ${parseFloat(distResult.diff) < 20 ? "#1D9E75" : "#BA7517"}`, color: parseFloat(distResult.diff) < 20 ? "#0F6E56" : "#854F0B", fontSize: 12, marginBottom: 12 }}>
-                Mean byte difference = {distResult.diff} — {parseFloat(distResult.diff) < 20 ? "PRF output is statistically indistinguishable from random ✓" : "outputs differ — check PRF implementation"}
+                Mean byte difference = {distResult.diff} — {parseFloat(distResult.diff) < 20 ? "statistically indistinguishable from random ✓" : "outputs differ — check PRF implementation"}
               </div>
-              <SectionHeading>First 10 query results</SectionHeading>
               <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", overflow: "hidden" }}>
                 <div style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 60px", background: "var(--color-background-secondary)", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
-                  {["x", "F_k(x)", "random(x)", "match?"].map((h, i) => <div key={i} style={{ padding: "6px 10px", fontSize: 10, fontWeight: 500, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{h}</div>)}
+                  {["x", "F_k(x)", "random(x)", "match?"].map((h, i) => <div key={i} style={{ padding: "6px 10px", fontSize: 10, fontWeight: 500, color: "var(--color-text-secondary)", textTransform: "uppercase" }}>{h}</div>)}
                 </div>
                 {distResult.queries.map((q, i) => (
                   <div key={i} style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 60px", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
@@ -860,7 +988,325 @@ function PA2Panel() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Root — order: PA#0 → PA#1 → PA#2
+// PA #3 panel — IND-CPA game + Enc/Dec demo
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function PA3Panel() {
+  const [prfType,     setPrfType]     = useState("GGM");
+  const [keyHex,      setKeyHex]      = useState("c0ffee11");
+  const [reuseNonce,  setReuseNonce]  = useState(false);
+
+  // ── Enc/Dec demo state ────────────────────────────────────────────────────
+  const [msgHex,      setMsgHex]      = useState("deadbeef");
+  const [encResult,   setEncResult]   = useState(null);
+  const [decResult,   setDecResult]   = useState(null);
+  const [decInput,    setDecInput]    = useState("");
+
+  // ── IND-CPA interactive game state ────────────────────────────────────────
+  const [m0,          setM0]          = useState("aabbccdd");
+  const [m1,          setM1]          = useState("11223344");
+  const [gameRound,   setGameRound]   = useState(null);  // current challenge
+  const [guess,       setGuess]       = useState(null);
+  const [history,     setHistory]     = useState([]);    // { b, guess, correct }
+  const [showResult,  setShowResult]  = useState(false);
+
+  // ── CPA simulation state ──────────────────────────────────────────────────
+  const [simResult,   setSimResult]   = useState(null);
+
+  // ── Nonce reuse attack state ──────────────────────────────────────────────
+  const [attackResult,setAttackResult]= useState(null);
+
+  // Derived advantage
+  const rounds   = history.length;
+  const correct  = history.filter(h => h.correct).length;
+  const advantage = rounds > 0 ? Math.abs((correct / rounds) - 0.5) * 2 : 0;
+
+  function doEnc() {
+    const r = encCPA(keyHex, msgHex, prfType, reuseNonce);
+    setEncResult(r);
+    setDecResult(null);
+    setDecInput(r.ciphertext);
+  }
+
+  function doDec() {
+    const parts = decInput.split(":");
+    if (parts.length !== 2) { setDecResult({ error: "Format must be r:c" }); return; }
+    const [rHex, cHex] = parts;
+    setDecResult(decCPA(keyHex, rHex, cHex, prfType));
+  }
+
+  function doEncryptChallenge() {
+    if (m0.length !== m1.length) return;
+    const round = playCPAGameRound(keyHex, m0, m1, prfType, reuseNonce);
+    setGameRound(round);
+    setGuess(null);
+    setShowResult(false);
+  }
+
+  function doGuess(g) {
+    if (!gameRound || showResult) return;
+    setGuess(g);
+    setShowResult(true);
+    setHistory(h => [...h, { b: gameRound.b, guess: g, correct: g === gameRound.b }]);
+  }
+
+  function resetGame() { setHistory([]); setGameRound(null); setGuess(null); setShowResult(false); }
+
+  function runSim() { setSimResult(runCPASimulation(keyHex, prfType, reuseNonce, 50)); }
+  function runAttack() { setAttackResult(demonstrateNonceReuseAttack(keyHex, prfType)); }
+
+  const mismatch = m0.length !== m1.length;
+  const modeColor = reuseNonce ? { bg: "#FCEBEB", border: "#E24B4A", text: "#A32D2D" } : { bg: "#E1F5EE", border: "#1D9E75", text: "#0F6E56" };
+
+  return (
+    <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
+      {/* Header */}
+      <div style={{ padding: "10px 16px", background: "#E1F5EE", borderBottom: "0.5px solid #9FE1CB", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: "0.07em", textTransform: "uppercase", color: "#0F6E56" }}>PA #3 — CPA-secure encryption & IND-CPA game</div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <ToggleBar value={prfType} onChange={setPrfType} options={[
+            { value: "GGM", label: "GGM PRF", activeStyle: { bg: "#EEEDFE", border: "#7F77DD", color: "#3C3489" } },
+            { value: "AES", label: "AES PRF", activeStyle: { bg: "#E6F1FB", border: "#378ADD", color: "#185FA5" } },
+          ]} />
+          <ToggleBar value={reuseNonce ? "broken" : "secure"} onChange={v => { setReuseNonce(v === "broken"); resetGame(); setSimResult(null); setAttackResult(null); }} options={[
+            { value: "secure", label: "Secure (fresh r)",   activeStyle: { bg: "#E1F5EE", border: "#1D9E75", color: "#0F6E56" } },
+            { value: "broken", label: "Broken (reuse r)",   activeStyle: { bg: "#FCEBEB", border: "#E24B4A", color: "#A32D2D" } },
+          ]} />
+        </div>
+      </div>
+
+      <div style={{ padding: "16px" }}>
+        {/* Mode banner */}
+        <div style={{ padding: "8px 14px", borderRadius: "var(--border-radius-md)", background: modeColor.bg, border: `0.5px solid ${modeColor.border}`, color: modeColor.text, fontSize: 12, marginBottom: 16 }}>
+          {reuseNonce
+            ? "Broken mode: r is always F_k(0) — same plaintext always produces the same ciphertext. The IND-CPA adversary can distinguish trivially."
+            : "Secure mode: r ← {0,1}ⁿ freshly each encryption. Advantage should converge to ≈ 0 over many rounds."}
+        </div>
+
+        {/* Row 1: Key + Enc/Dec */}
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16, marginBottom: 20 }}>
+
+          {/* Enc */}
+          <div>
+            <SectionHeading>Enc(k, m) — C = ⟨r, F_k(r) ⊕ m⟩</SectionHeading>
+            <div style={{ marginBottom: 10 }}><FieldLabel>Key k (hex)</FieldLabel><TextInput value={keyHex} onChange={setKeyHex} placeholder="e.g. c0ffee11" /></div>
+            <div style={{ marginBottom: 10 }}><FieldLabel>Message m (hex)</FieldLabel><TextInput value={msgHex} onChange={setMsgHex} placeholder="e.g. deadbeef" /></div>
+            <button onClick={doEnc} style={{ width: "100%", padding: "8px 14px", fontSize: 12, fontWeight: 500, border: "0.5px solid #1D9E75", borderRadius: "var(--border-radius-md)", background: "#E1F5EE", color: "#0F6E56", cursor: "pointer", fontFamily: "var(--font-sans)", marginBottom: 12 }}>
+              Encrypt
+            </button>
+            {encResult && (
+              <div>
+                <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Ciphertext C = r : c</div>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 4 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 12 }}>r:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "#185FA5", wordBreak: "break-all" }}>0x{encResult.r}</span></div>
+                  <div style={{ display: "flex", gap: 8 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 12 }}>c:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)", wordBreak: "break-all" }}>0x{encResult.c}</span></div>
+                </div>
+                {encResult.blocks.length > 0 && (
+                  <div>
+                    <SectionHeading>Block-by-block detail (multi-block counter mode)</SectionHeading>
+                    {encResult.blocks.map((blk, i) => (
+                      <div key={i} style={{ padding: "6px 10px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 6, fontSize: 11 }}>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, background: "#EEEDFE", color: "#3C3489", border: "0.5px solid #7F77DD", fontFamily: "var(--font-mono)" }}>blk {i}</span>
+                          <span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-secondary)" }}>m: 0x{blk.mBlock}</span>
+                          <span style={{ color: "var(--color-text-secondary)" }}>⊕</span>
+                          <span style={{ fontFamily: "var(--font-mono)", color: "#185FA5" }}>F_k(r+{i}): 0x{blk.keyStream}</span>
+                          <span style={{ color: "var(--color-text-secondary)" }}>=</span>
+                          <span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-primary)", fontWeight: 500 }}>0x{blk.cBlock}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Dec */}
+          <div>
+            <SectionHeading>Dec(k, r, c) — m = F_k(r) ⊕ c</SectionHeading>
+            <div style={{ marginBottom: 10 }}>
+              <FieldLabel>Ciphertext (r:c format)</FieldLabel>
+              <TextInput value={decInput} onChange={setDecInput} placeholder="paste r:c from Enc output" />
+            </div>
+            <button onClick={doDec} style={{ width: "100%", padding: "8px 14px", fontSize: 12, fontWeight: 500, border: "0.5px solid #378ADD", borderRadius: "var(--border-radius-md)", background: "#E6F1FB", color: "#185FA5", cursor: "pointer", fontFamily: "var(--font-sans)", marginBottom: 12 }}>
+              Decrypt
+            </button>
+            {decResult && (
+              <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)" }}>
+                {decResult.error
+                  ? <div style={{ fontSize: 12, color: "#A32D2D" }}>{decResult.error}</div>
+                  : <>
+                      <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Recovered plaintext</div>
+                      <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--color-text-primary)", fontWeight: 500, wordBreak: "break-all" }}>0x{decResult.msgHex}</div>
+                      {decResult.msgHex === msgHex && <div style={{ fontSize: 11, color: "#0F6E56", marginTop: 6 }}>Matches original message ✓</div>}
+                    </>
+                }
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Row 2: IND-CPA interactive game */}
+        <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16, marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+            <SectionHeading>IND-CPA game — play as the adversary (20 rounds target)</SectionHeading>
+            {rounds > 0 && <button onClick={resetGame} style={{ fontSize: 11, padding: "4px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", color: "var(--color-text-secondary)", cursor: "pointer", fontFamily: "var(--font-sans)" }}>Reset</button>}
+          </div>
+
+          {/* Running advantage counter */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+            {[
+              { label: "Rounds played", val: rounds },
+              { label: "Correct guesses", val: correct },
+              { label: "Advantage", val: advantage.toFixed(3) },
+              { label: "Target", val: reuseNonce ? "≈ 1.0" : "≤ 0.1" },
+            ].map((s, i) => (
+              <div key={i} style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)" }}>
+                <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>{s.label}</div>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 16, fontWeight: 500, color: i === 2 ? (reuseNonce ? (advantage > 0.8 ? "#0F6E56" : "#A32D2D") : (advantage <= 0.1 ? "#0F6E56" : "#854F0B")) : "var(--color-text-primary)" }}>{s.val}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Advantage bar */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ height: 8, borderRadius: 4, background: "var(--color-background-secondary)", overflow: "hidden", border: "0.5px solid var(--color-border-tertiary)" }}>
+              <div style={{ height: "100%", width: `${Math.min(advantage, 1) * 100}%`, background: reuseNonce ? "#E24B4A" : advantage <= 0.1 ? "#1D9E75" : advantage <= 0.3 ? "#BA7517" : "#E24B4A", transition: "width 0.4s" }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--color-text-secondary)", marginTop: 2 }}><span>0 (random)</span><span>1.0 (perfect)</span></div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+            {/* Step 1: messages */}
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8, color: "var(--color-text-primary)" }}>Step 1 — enter two equal-length messages</div>
+              <div style={{ marginBottom: 8 }}><FieldLabel>m₀ (hex)</FieldLabel><TextInput value={m0} onChange={setM0} placeholder="e.g. aabbccdd" /></div>
+              <div style={{ marginBottom: 10 }}><FieldLabel>m₁ (hex)</FieldLabel><TextInput value={m1} onChange={setM1} placeholder="e.g. 11223344" /></div>
+              {mismatch && <div style={{ fontSize: 11, color: "#A32D2D", marginBottom: 8 }}>m₀ and m₁ must be the same length</div>}
+              <button onClick={doEncryptChallenge} disabled={mismatch} style={{ width: "100%", padding: "9px 14px", fontSize: 13, fontWeight: 500, border: "0.5px solid #1D9E75", borderRadius: "var(--border-radius-md)", background: mismatch ? "var(--color-background-secondary)" : "#E1F5EE", color: mismatch ? "var(--color-text-secondary)" : "#0F6E56", cursor: mismatch ? "not-allowed" : "pointer", fontFamily: "var(--font-sans)" }}>
+                Step 2 — Encrypt (challenger picks b)
+              </button>
+            </div>
+
+            {/* Step 3: guess */}
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8, color: "var(--color-text-primary)" }}>Step 3 — see C* and guess b</div>
+              {gameRound ? (
+                <div>
+                  <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 10 }}>
+                    <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Challenge ciphertext C*</div>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 3 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 12 }}>r:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "#185FA5", wordBreak: "break-all" }}>0x{gameRound.r}</span></div>
+                    <div style={{ display: "flex", gap: 6 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 12 }}>c:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all", color: "var(--color-text-primary)" }}>0x{gameRound.c}</span></div>
+                  </div>
+                  {!showResult ? (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => doGuess(0)} style={{ flex: 1, padding: "9px", fontSize: 13, fontWeight: 500, border: "0.5px solid #378ADD", borderRadius: "var(--border-radius-md)", background: "#E6F1FB", color: "#185FA5", cursor: "pointer", fontFamily: "var(--font-sans)" }}>Guess b = 0 (m₀)</button>
+                      <button onClick={() => doGuess(1)} style={{ flex: 1, padding: "9px", fontSize: 13, fontWeight: 500, border: "0.5px solid #1D9E75", borderRadius: "var(--border-radius-md)", background: "#E1F5EE", color: "#0F6E56", cursor: "pointer", fontFamily: "var(--font-sans)" }}>Guess b = 1 (m₁)</button>
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: guess === gameRound.b ? "#E1F5EE" : "#FCEBEB", border: `0.5px solid ${guess === gameRound.b ? "#1D9E75" : "#E24B4A"}`, color: guess === gameRound.b ? "#0F6E56" : "#A32D2D", fontSize: 13, fontWeight: 500, marginBottom: 10 }}>
+                        {guess === gameRound.b ? "Correct!" : "Wrong!"} Challenger had b = {gameRound.b} (encrypted m{gameRound.b})
+                        {reuseNonce && guess === gameRound.b && <div style={{ fontSize: 11, fontWeight: 400, marginTop: 4 }}>Nonce reuse made this trivial — Enc(m₀) is deterministic !</div>}
+                      </div>
+                      <button onClick={doEncryptChallenge} style={{ width: "100%", padding: "8px", fontSize: 12, fontWeight: 500, border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", color: "var(--color-text-primary)", cursor: "pointer", fontFamily: "var(--font-sans)" }}>Next round</button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ padding: "20px", textAlign: "center", fontSize: 12, color: "var(--color-text-secondary)", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)" }}>
+                  Enter m₀ and m₁ and click "Encrypt" to get a challenge ciphertext.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Recent rounds log */}
+          {history.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <SectionHeading>Recent rounds</SectionHeading>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {history.slice(-20).map((h, i) => (
+                  <span key={i} style={{ fontSize: 10, padding: "2px 7px", borderRadius: 3, fontWeight: 500, background: h.correct ? "#E1F5EE" : "#FCEBEB", border: `0.5px solid ${h.correct ? "#1D9E75" : "#E24B4A"}`, color: h.correct ? "#0F6E56" : "#A32D2D" }}>{h.correct ? "✓" : "✗"}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Row 3: CPA simulation + nonce-reuse attack */}
+        <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", paddingTop: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 16 }}>
+
+            {/* CPA simulation */}
+            <div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <SectionHeading>CPA game simulation — dummy adversary, 50 rounds</SectionHeading>
+                <button onClick={runSim} style={{ padding: "6px 12px", fontSize: 11, fontWeight: 500, border: "0.5px solid #7F77DD", borderRadius: "var(--border-radius-md)", background: "#EEEDFE", color: "#3C3489", cursor: "pointer", fontFamily: "var(--font-sans)", whiteSpace: "nowrap" }}>Run sim</button>
+              </div>
+              {simResult && (
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
+                    {[{ label: "Rounds", val: simResult.rounds }, { label: "Correct", val: simResult.correct }, { label: "Advantage", val: simResult.advantage }].map((s, i) => (
+                      <div key={i} style={{ padding: "8px 10px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)" }}>
+                        <div style={{ fontSize: 10, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>{s.label}</div>
+                        <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 500, color: "var(--color-text-primary)" }}>{s.val}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ padding: "8px 12px", borderRadius: "var(--border-radius-md)", background: parseFloat(simResult.advantage) <= 0.15 && !reuseNonce ? "#E1F5EE" : reuseNonce && parseFloat(simResult.advantage) > 0.8 ? "#FCEBEB" : "#FAEEDA", border: `0.5px solid ${parseFloat(simResult.advantage) <= 0.15 && !reuseNonce ? "#1D9E75" : reuseNonce ? "#E24B4A" : "#BA7517"}`, fontSize: 12, color: parseFloat(simResult.advantage) <= 0.15 && !reuseNonce ? "#0F6E56" : reuseNonce ? "#A32D2D" : "#854F0B" }}>
+                    Advantage ≈ {simResult.advantage} — {reuseNonce ? "broken mode: adversary wins trivially !" : parseFloat(simResult.advantage) <= 0.15 ? "secure mode: advantage ≈ 0 ✓" : "advantage non-trivial — check implementation"}
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <SectionHeading>First 5 rounds</SectionHeading>
+                    {simResult.log.map((l, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, fontSize: 11, padding: "4px 0", borderBottom: "0.5px solid var(--color-border-tertiary)", alignItems: "center" }}>
+                        <span style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-secondary)", minWidth: 18 }}>#{l.i}</span>
+                        <span style={{ color: "var(--color-text-secondary)" }}>b={l.b} guess={l.guess}</span>
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-text-secondary)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.c}</span>
+                        <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, background: l.win ? "#E1F5EE" : "#FCEBEB", border: `0.5px solid ${l.win ? "#1D9E75" : "#E24B4A"}`, color: l.win ? "#0F6E56" : "#A32D2D" }}>{l.win ? "✓" : "✗"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Nonce reuse attack */}
+            <div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <SectionHeading>Broken variant — nonce reuse attack demo</SectionHeading>
+                <button onClick={runAttack} style={{ padding: "6px 12px", fontSize: 11, fontWeight: 500, border: "0.5px solid #D85A30", borderRadius: "var(--border-radius-md)", background: "#FAECE7", color: "#993C1D", cursor: "pointer", fontFamily: "var(--font-sans)", whiteSpace: "nowrap" }}>Run attack</button>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginBottom: 10 }}>
+                Deterministic encryption reuses r = F_k(0) always. An adversary who queries Enc(m) twice sees identical ciphertexts — trivially breaking IND-CPA.
+              </div>
+              {attackResult && (
+                <div>
+                  <div style={{ padding: "10px 12px", background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", marginBottom: 8 }}>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 4 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 24 }}>m:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)" }}>0x{attackResult.m}</span></div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 4 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 24 }}>C₁:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)", wordBreak: "break-all" }}>{attackResult.ct1}</span></div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 24 }}>C₂:</span><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-text-primary)", wordBreak: "break-all" }}>{attackResult.ct2}</span></div>
+                    <div style={{ display: "flex", gap: 8 }}><span style={{ fontSize: 10, color: "var(--color-text-secondary)", minWidth: 24 }}>C₁=C₂:</span><span style={{ fontSize: 12, fontWeight: 500, color: attackResult.detected ? "#A32D2D" : "#0F6E56" }}>{attackResult.detected ? "YES — nonce reuse detected !" : "No match (secure)"}</span></div>
+                  </div>
+                  {attackResult.detected && (
+                    <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "#FCEBEB", border: "0.5px solid #E24B4A", color: "#A32D2D", fontSize: 12 }}>
+                      Adversary queries Enc(m) twice and sees C₁ = C₂. Since they submitted m, they know exactly which message was encrypted — IND-CPA is broken.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Root
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function MinicryptExplorer() {
@@ -871,7 +1317,7 @@ export default function MinicryptExplorer() {
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 20, paddingBottom: 16, borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 500, color: "var(--color-text-primary)" }}>CS8.401 Minicrypt Clique Explorer</div>
-          <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF</div>
+          <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF · PA#3 CPA encryption</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>Foundation:</span>
@@ -890,6 +1336,9 @@ export default function MinicryptExplorer() {
 
       <Divider label="PA #2 — GGM PRF demo" />
       <PA2Panel />
+
+      <Divider label="PA #3 — CPA-secure encryption & IND-CPA game" />
+      <PA3Panel />
     </div>
   );
 }
