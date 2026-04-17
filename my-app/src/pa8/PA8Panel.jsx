@@ -156,25 +156,74 @@ function CompressionExplorer({ params }) {
 
 // ── Birthday attack demo ──────────────────────────────────────────────────────
 
+// function BirthdayDemo({ params }) {
+//   const [running,  setRunning]  = useState(false);
+//   const [count,    setCount]    = useState(0);
+//   const [result,   setResult]   = useState(null);
+//   const cancelRef = useRef(false);
+//   const TARGET = 256; // 2^(n/2) for n=16
+
+//   function runAttack() {
+//     setRunning(true);
+//     setResult(null);
+//     setCount(0);
+//     cancelRef.current = false;
+
+//     // Run in chunks to keep UI responsive
+//     const bridge = makeDLPCompressFn(params);
+//     const seen   = new Map();
+//     let   i      = 0;
+//     const MAX    = 4000;
+
+//     function step() {
+//       if (cancelRef.current) { setRunning(false); return; }
+//       const CHUNK = 40;
+//       for (let c = 0; c < CHUNK && i < MAX; c++, i++) {
+//         const input = Array.from({ length: 8 }, () => Math.floor(Math.random() * 256));
+//         const padded = mdPad(input);
+//         const blocks = parseBlocks(padded);
+//         let z = IV;
+//         for (const b of blocks) z = bridge(z, b);
+//         const d16 = parseInt(z.slice(-4), 16) & 0xFFFF;
+//         const hex  = input.map(b => b.toString(16).padStart(2,"0")).join("");
+
+//         if (seen.has(d16)) {
+//           const prev = seen.get(d16);
+//           if (prev !== hex) {
+//             setCount(i + 1);
+//             setResult({ found: true, count: i + 1, input1: prev, input2: hex, digest: d16.toString(16).padStart(4, "0") });
+//             setRunning(false);
+//             return;
+//           }
+//         }
+//         seen.set(d16, hex);
+//       }
+//       setCount(i);
+//       if (i < MAX) setTimeout(step, 0);
+//       else { setResult({ found: false, count: MAX }); setRunning(false); }
+//     }
+//     setTimeout(step, 0);
+//   }
+
 function BirthdayDemo({ params }) {
   const [running,  setRunning]  = useState(false);
   const [count,    setCount]    = useState(0);
   const [result,   setResult]   = useState(null);
   const cancelRef = useRef(false);
   const TARGET = 256; // 2^(n/2) for n=16
-
+ 
   function runAttack() {
     setRunning(true);
     setResult(null);
     setCount(0);
     cancelRef.current = false;
-
+ 
     // Run in chunks to keep UI responsive
     const bridge = makeDLPCompressFn(params);
     const seen   = new Map();
     let   i      = 0;
     const MAX    = 4000;
-
+ 
     function step() {
       if (cancelRef.current) { setRunning(false); return; }
       const CHUNK = 40;
@@ -186,10 +235,15 @@ function BirthdayDemo({ params }) {
         for (const b of blocks) z = bridge(z, b);
         const d16 = parseInt(z.slice(-4), 16) & 0xFFFF;
         const hex  = input.map(b => b.toString(16).padStart(2,"0")).join("");
-
+ 
         if (seen.has(d16)) {
           const prev = seen.get(d16);
           if (prev !== hex) {
+            console.log("=== Collision found! ===");
+            console.log("Input A (hex):", prev);
+            console.log("Input B (hex):", hex);
+            console.log("Shared 16-bit digest:", d16.toString(16).padStart(4, "0"));
+            console.log("Found after", i + 1, "hashes");
             setCount(i + 1);
             setResult({ found: true, count: i + 1, input1: prev, input2: hex, digest: d16.toString(16).padStart(4, "0") });
             setRunning(false);
@@ -204,7 +258,7 @@ function BirthdayDemo({ params }) {
     }
     setTimeout(step, 0);
   }
-
+  
   const progress = Math.min(count / TARGET * 100, 100);
   const barColor = result?.found ? "#1D9E75" : running ? "#378ADD" : "#D3D1C7";
 

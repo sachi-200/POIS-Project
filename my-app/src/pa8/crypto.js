@@ -87,6 +87,14 @@ export function makeDLPCompressFn({ p, q, g, h: hGen }) {
     const x = BigInt("0x" + zHex) % q;
     // Fold 8-byte block into a BigInt, reduce mod q
     let y = 0n;
+
+    // Note: 8-byte blocks can represent values up to ~1.8×10¹⁹, which far exceeds
+    // q = 32771. Reducing mod q maps ~5.6×10¹⁴ distinct blocks to each y value,
+    // creating trivial collisions (B and B+q produce identical compression outputs).
+    // For a true CRHF, block size must be < q (e.g., 1 byte for this toy q).
+    // This is acceptable for a demo — the birthday attack still correctly demonstrates
+    // the O(√q) bound on the truncated output.
+    
     for (const b of blockBytes) y = (y * 256n + BigInt(b)) % q;
     const out = dlpCompress(x, y, g, hGen, p);
     // Return as 8-char hex (low 32 bits) to stay compatible with PA#7 chain
@@ -127,6 +135,7 @@ export function dlpHash(message, params) {
  * Calls onProgress(count) every `reportEvery` steps.
  */
 export function birthdayAttack(params, onProgress, maxIter = 2000, reportEvery = 50) {
+  console.log("Birthday attack started");
   const bridge = makeDLPCompressFn(params);
   const seen   = new Map();   // digest16 → input bytes
 
@@ -143,9 +152,28 @@ export function birthdayAttack(params, onProgress, maxIter = 2000, reportEvery =
       const prev = seen.get(d16);
       const hex1 = prev.map(b => b.toString(16).padStart(2,"0")).join("");
       const hex2 = input.map(b => b.toString(16).padStart(2,"0")).join("");
+        //   if (hex1 !== hex2) {
+        //     onProgress && onProgress(i + 1);
+        //     return { found: true, count: i + 1, input1: hex1, input2: hex2, digest: d16.toString(16).padStart(4, "0") };
+        //   }
       if (hex1 !== hex2) {
+
+        
+        console.log("Input A:", hex1);
+        console.log("Input B:", hex2);
+
+        console.log("Verify A:", dlpHash(prev, params));
+        console.log("Verify B:", dlpHash(input, params));
+
         onProgress && onProgress(i + 1);
-        return { found: true, count: i + 1, input1: hex1, input2: hex2, digest: d16.toString(16).padStart(4, "0") };
+
+        return {
+            found: true,
+            count: i + 1,
+            input1: hex1,
+            input2: hex2,
+            digest: d16.toString(16).padStart(4, "0")
+        };
       }
     }
     seen.set(d16, input);
