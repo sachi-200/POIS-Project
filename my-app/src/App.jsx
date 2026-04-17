@@ -1009,6 +1009,9 @@ import PA1Panel from "./pa1/PA1Panel.jsx";
 import PA2Panel from "./pa2/PA2Panel.jsx";
 import PA3Panel from "./pa3/PA3Panel.jsx";
 import PA4Panel from "./pa4/PA4Panel.jsx";
+import PA5Panel from "./pa5/PA5Panel.jsx";
+import PA7Panel from "./pa7/PA7Panel.jsx";
+import PA8Panel from "./pa8/PA8Panel.jsx";
 
 export default function App() {
   const [foundationType, setFoundationType] = useState("AES");
@@ -1046,6 +1049,15 @@ export default function App() {
 
       <Divider label="PA #4 — Modes of Operation: CBC · OFB · CTR" />
       <PA4Panel />
+
+      <Divider label="PA #5 — Message Authentication Codes" />
+      <PA5Panel />
+
+      <Divider label="PA #7 — Merkle-Damgård chain viewer" />
+      <PA7Panel />
+
+      <Divider label="PA #8 — DLP-based Collision-Resistant Hash" />
+      <PA8Panel />
     </div>
   );
 }
