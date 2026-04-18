@@ -1010,6 +1010,7 @@ import PA2Panel from "./pa2/PA2Panel.jsx";
 import PA3Panel from "./pa3/PA3Panel.jsx";
 import PA4Panel from "./pa4/PA4Panel.jsx";
 import PA5Panel from "./pa5/PA5Panel.jsx";
+import PA6Panel from "./pa6/PA6Panel.jsx";
 import PA7Panel from "./pa7/PA7Panel.jsx";
 import PA8Panel from "./pa8/PA8Panel.jsx";
 
@@ -1052,6 +1053,9 @@ export default function App() {
 
       <Divider label="PA #5 — Message Authentication Codes" />
       <PA5Panel />
+
+      <Divider label="PA #6 — CCA-Secure Symmetric Encryption" />
+      <PA6Panel />
 
       <Divider label="PA #7 — Merkle-Damgård chain viewer" />
       <PA7Panel />
