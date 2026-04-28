@@ -1014,6 +1014,7 @@ import PA6Panel from "./pa6/PA6Panel.jsx";
 import PA7Panel from "./pa7/PA7Panel.jsx";
 import PA8Panel from "./pa8/PA8Panel.jsx";
 import PA9Panel from "./pa9/PA9Panel.jsx";
+import PA10Panel from "./pa10/PA10Panel.jsx";
 import PA11Panel from "./pa11/PA11Panel.jsx";
 import PA12Panel from "./pa12/PA12Panel.jsx";
 import PA13Panel from "./pa13/PA13Panel.jsx";
@@ -1031,7 +1032,7 @@ export default function App() {
         <div>
           <div style={{ fontSize: 16, fontWeight: 500, color: "var(--color-text-primary)" }}>CS8.401 Minicrypt Clique Explorer</div>
           <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>
-            PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF · PA#3 CPA encryption · PA#4 Modes of Operation · PA#5-PA#8 · PA#9 Birthday Attack · PA#11 Diffie Hellman · PA#12 RSA · PA#13 Miller-Rabin · PA#14 CRT/RSA Attack · PA#15 Digital Signatures · PA#16 ElGamal PKC
+            PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF · PA#3 CPA encryption · PA#4 Modes of Operation · PA#5-PA#8 · PA#9 Birthday Attack · PA#10 HMAC/CCA · PA#11 Diffie Hellman · PA#12 RSA · PA#13 Miller-Rabin · PA#14 CRT/RSA Attack · PA#15 Digital Signatures · PA#16 ElGamal PKC
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1072,6 +1073,9 @@ export default function App() {
 
       <Divider label="PA #9 — Birthday Attack (Collision Finding)" />
       <PA9Panel />
+
+      <Divider label="PA #10 — HMAC and HMAC-Based CCA Encryption" />
+      <PA10Panel />
 
       <Divider label="PA #11 — Diffie-Hellman Key Exchange" />
       <PA11Panel />
