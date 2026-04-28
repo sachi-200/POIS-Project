@@ -1017,6 +1017,7 @@ import PA9Panel from "./pa9/PA9Panel.jsx";
 import PA11Panel from "./pa11/PA11Panel.jsx";
 import PA12Panel from "./pa12/PA12Panel.jsx";
 import PA13Panel from "./pa13/PA13Panel.jsx";
+import PA14Panel from "./pa14/PA14Panel.jsx";
 
 export default function App() {
   const [foundationType, setFoundationType] = useState("AES");
@@ -1028,7 +1029,7 @@ export default function App() {
         <div>
           <div style={{ fontSize: 16, fontWeight: 500, color: "var(--color-text-primary)" }}>CS8.401 Minicrypt Clique Explorer</div>
           <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 2 }}>
-            PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF · PA#3 CPA encryption · PA#4 Modes of Operation · PA#5-PA#8 · PA#9 Birthday Attack · PA#11 Diffie Hellman · PA#12 RSA · PA#13 Miller-Rabin
+            PA#0 scaffold · PA#1 OWF & PRG · PA#2 GGM PRF · PA#3 CPA encryption · PA#4 Modes of Operation · PA#5-PA#8 · PA#9 Birthday Attack · PA#11 Diffie Hellman · PA#12 RSA · PA#13 Miller-Rabin · PA#13 Miller-Rabin · PA#14 CRT/RSA Attack
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1078,6 +1079,9 @@ export default function App() {
 
       <Divider label="PA #13 — Miller-Rabin Primality Testing" />
       <PA13Panel />
+
+      <Divider label="PA #14 — CRT & Breaking Textbook RSA" />
+      <PA14Panel />
     </div>
   );
 }
