@@ -1023,6 +1023,8 @@ import PA15Panel from "./pa15/PA15Panel.jsx";
 import PA16Panel from "./pa16/PA16Panel.jsx";
 import PA17Panel from "./pa17/PA17Panel.jsx";
 import PA18Panel from "./pa18/PA18Panel.jsx";
+import PA19Panel from "./pa19/PA19Panel.jsx";
+
 
 export default function App() {
   const [foundationType, setFoundationType] = useState("AES");
@@ -1102,6 +1104,9 @@ export default function App() {
 
       <Divider label="PA #18 — Oblivious Transfer (OT)" />
       <PA18Panel />
+
+      <Divider label="PA #19 — Secure Multi-Party Computation: AND & XOR Gates" />
+      <PA19Panel />
     </div>
   );
 }
