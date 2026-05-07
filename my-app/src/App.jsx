@@ -1021,6 +1021,7 @@ import PA13Panel from "./pa13/PA13Panel.jsx";
 import PA14Panel from "./pa14/PA14Panel.jsx";
 import PA15Panel from "./pa15/PA15Panel.jsx";
 import PA16Panel from "./pa16/PA16Panel.jsx";
+import PA16Panel from "./pa17/PA17Panel.jsx";
 
 export default function App() {
   const [foundationType, setFoundationType] = useState("AES");
@@ -1093,6 +1094,9 @@ export default function App() {
       <PA15Panel />
 
       <Divider label="PA #16 — ElGamal Public-Key Cryptosystem" />
+      <PA16Panel />
+
+      <Divider label="PA #17 — CCA-Secure PKC (Sign-then-Encrypt)" />
       <PA16Panel />
     </div>
   );
