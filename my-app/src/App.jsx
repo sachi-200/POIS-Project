@@ -1024,6 +1024,7 @@ import PA16Panel from "./pa16/PA16Panel.jsx";
 import PA17Panel from "./pa17/PA17Panel.jsx";
 import PA18Panel from "./pa18/PA18Panel.jsx";
 import PA19Panel from "./pa19/PA19Panel.jsx";
+import PA20Panel from "./pa20/PA20Panel.jsx";
 
 
 export default function App() {
@@ -1107,6 +1108,9 @@ export default function App() {
 
       <Divider label="PA #19 — Secure Multi-Party Computation: AND & XOR Gates" />
       <PA19Panel />
+
+      <Divider label="PA #20 — Secure Multi-Party Computation (Yao/GMW)" />
+      <PA20Panel />
     </div>
   );
 }
