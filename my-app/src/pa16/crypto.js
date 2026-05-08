@@ -77,7 +77,7 @@ export function representativeToMaybeText(m) {
   return null;
 }
 
-function randomBigIntInRange(lo, hi) {
+export function randomBigIntInRange(lo, hi) {
   lo = BigInt(lo);
   hi = BigInt(hi);
   if (hi <= lo) return lo;
