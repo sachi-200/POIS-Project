@@ -18,6 +18,8 @@ import {
   rsaDec,
   modPow,
   modInverse,
+  pkcs15Enc,
+  pkcs15Dec,
 } from "../pa12/crypto.js";
 import { genPrime } from "../pa13/crypto.js";
 
@@ -73,6 +75,12 @@ export function bigIntToText(n) {
   } catch {
     return null;
   }
+}
+
+export function bytesToBigInt(bytes) {
+  let out = 0n;
+  for (const b of bytes) out = (out << 8n) | BigInt(b);
+  return out;
 }
 
 function randomBigIntBelow(n) {
@@ -366,10 +374,16 @@ export function runHastadDemo(message = "attack", bits = 192, e = 3n) {
 }
 
 /**
- * Illustrates why Håstad fails when each recipient encrypts a different padded
- * value. This is a lightweight stand-in for randomized padding such as PKCS#1.
+ * Real PKCS#1 v1.5 padding contrast for Håstad's attack.
+ *
+ * Each recipient encrypts the same *message*, but PKCS#1 v1.5 first maps it to a
+ * different padded integer:
+ *   EM_i = 00 || 02 || PS_i || 00 || m
+ * where PS_i is fresh random nonzero padding. Therefore the ciphertexts are
+ * c_i = EM_i^e mod N_i, not c_i = m^e mod N_i. CRT combines three different
+ * e-th powers, so the integer cube-root step no longer recovers m.
  */
-export function runRandomizedPaddingContrast(message = "attack", bits = 192, e = 3n) {
+export function runPkcsPaddingContrast(message = "attack", bits = 192, e = 3n) {
   e = BigInt(e);
   const M = textToBigInt(message);
   const recipients = [];
@@ -379,19 +393,33 @@ export function runRandomizedPaddingContrast(message = "attack", bits = 192, e =
 
   for (let i = 0; i < Number(e); i++) {
     const sk = rsaKeygenWithExponent(bits, e);
-    const randomPad = 1n + randomBigIntBelow(0xffffffffn);
-    const padded = (M << 40n) + (BigInt(i + 1) << 32n) + randomPad;
-    if (padded >= sk.N) {
-      throw new Error("randomized padded value is too large; increase key size");
-    }
-    const C = modPow(padded, e, sk.N);
-    recipients.push({ index: i + 1, pk: { N: sk.N, e: sk.e }, padded, ciphertext: C });
-    ciphertexts.push(C);
+    const pk = { N: sk.N, e: sk.e };
+
+    // Use PA#12's actual PKCS#1 v1.5 implementation, not a synthetic padding stand-in.
+    const enc = pkcs15Enc(pk, message);
+    const dec = pkcs15Dec({ N: sk.N, d: sk.d }, enc.C);
+    const padded = bytesToBigInt(enc.em);
+
+    recipients.push({
+      index: i + 1,
+      pk,
+      sk,
+      ciphertext: enc.C,
+      padded,
+      emHex: enc.emHex,
+      psHex: enc.psHex,
+      validPadding: dec.valid,
+      decryptedText: dec.mStr,
+    });
+    ciphertexts.push(enc.C);
     moduli.push(sk.N);
     paddedValues.push(padded);
   }
 
   const attack = hastadBroadcastAttack(ciphertexts, moduli, e);
+  const paddedValuesDiffer = new Set(paddedValues.map(v => v.toString())).size === paddedValues.length;
+  const allLegitimateDecryptionsOk = recipients.every(r => r.validPadding && r.decryptedText === message);
+
   return {
     message,
     messageInt: M,
@@ -400,9 +428,14 @@ export function runRandomizedPaddingContrast(message = "attack", bits = 192, e =
     attack,
     originalRecovered: attack.recovered === M,
     exactRoot: attack.exact,
-    explanation: "Because each recipient encrypted a different randomized padded integer, CRT reconstructs no single m^e. The integer-root step therefore does not recover the original message.",
+    paddedValuesDiffer,
+    allLegitimateDecryptionsOk,
+    explanation: "PKCS#1 v1.5 defeats this broadcast attack because every recipient encrypts a fresh padded integer EM_i = 00||02||PS_i||00||m. Since PS_i differs, the three ciphertexts are not residues of the same m^e, so CRT does not produce m^e and the integer cube-root step returns garbage.",
   };
 }
+
+// Backward-compatible alias in case any older panel code still imports this name.
+export const runRandomizedPaddingContrast = runPkcsPaddingContrast;
 
 // Convenience export for the panel: normal PA#12 keygen for CRT-RSA section.
 export { rsaKeygen };

@@ -11,7 +11,7 @@ import {
   testCrtRsaCorrectness,
   benchmarkRsaCrt,
   runHastadDemo,
-  runRandomizedPaddingContrast,
+  runPkcsPaddingContrast,
   truncMiddle,
 } from "./crypto.js";
 import {
@@ -189,7 +189,7 @@ export default function PA14Panel() {
     setTimeout(() => {
       try {
         const bits = Number.parseInt(hastadBits, 10) || 192;
-        setPaddingContrast(runRandomizedPaddingContrast(hastadMsg, bits, 3n));
+        setPaddingContrast(runPkcsPaddingContrast(hastadMsg, bits, 3n));
       } catch (e) {
         setPaddingContrast({ error: e.message });
       }
@@ -325,7 +325,7 @@ export default function PA14Panel() {
           <ActionButton onClick={runHastad} disabled={hastadRunning} tone="orange">
             {hastadRunning ? "Running…" : "Run Håstad attack"}
           </ActionButton>
-          <ActionButton onClick={runPaddingContrast} disabled={hastadRunning} tone="green">Show padded contrast</ActionButton>
+          <ActionButton onClick={runPaddingContrast} disabled={hastadRunning} tone="green">Use PKCS#1 padding</ActionButton>
         </div>
 
         {hastadResult?.error && <MonoBox>{hastadResult.error}</MonoBox>}
@@ -352,12 +352,30 @@ export default function PA14Panel() {
         {paddingContrast?.error && <MonoBox>{paddingContrast.error}</MonoBox>}
         {paddingContrast && !paddingContrast.error && (
           <div style={{ marginBottom: 4 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 10 }}>
-              <StatCard label="Original recovered?" value={paddingContrast.originalRecovered ? "YES ✗" : "NO ✓"} accent={paddingContrast.originalRecovered ? "#A32D2D" : "#0F6E56"} />
-              <StatCard label="Exact root?" value={paddingContrast.exactRoot ? "YES" : "NO"} />
-              <StatCard label="Recovered value" value={truncMiddle(paddingContrast.attack.recovered.toString(16), 24)} />
+            <SectionHeading>4. PKCS#1 v1.5 padding defeats Håstad</SectionHeading>
+            <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "#E1F5EE", border: "0.5px solid #1D9E75", marginBottom: 10, fontSize: 11, color: "#0F6E56", lineHeight: 1.7 }}>
+              Here we call PA#12's actual PKCS#1 v1.5 encryption. Each recipient can decrypt correctly, but the attacker cannot use CRT + cube root because the padded plaintext integers EM₁, EM₂, EM₃ are different.
             </div>
-            <MonoBox>{paddingContrast.explanation}</MonoBox>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 10 }}>
+              <StatCard label="Legitimate decryptions" value={paddingContrast.allLegitimateDecryptionsOk ? "ALL VALID ✓" : "ERROR ✗"} accent={paddingContrast.allLegitimateDecryptionsOk ? "#0F6E56" : "#A32D2D"} />
+              <StatCard label="PKCS padded EM values differ?" value={paddingContrast.paddedValuesDiffer ? "YES ✓" : "NO ✗"} accent={paddingContrast.paddedValuesDiffer ? "#0F6E56" : "#A32D2D"} />
+              <StatCard label="Attacker recovered m?" value={paddingContrast.originalRecovered ? "YES ✗" : "NO ✓"} accent={paddingContrast.originalRecovered ? "#A32D2D" : "#0F6E56"} />
+              <StatCard label="Exact cube root?" value={paddingContrast.exactRoot ? "YES" : "NO ✓"} accent={paddingContrast.exactRoot ? "#A32D2D" : "#0F6E56"} />
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              {paddingContrast.recipients.map((r) => (
+                <div key={r.index} style={{ padding: "8px 10px", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", marginBottom: 6 }}>
+                  <HexLine label={`Recipient ${r.index} PS`} value={truncMiddle(r.psHex, 30)} />
+                  <HexLine label={`Recipient ${r.index} EM`} value={truncMiddle(r.emHex, 30)} />
+                  <HexLine label={`Decrypts to`} value={r.decryptedText ?? "(invalid)"} />
+                </div>
+              ))}
+            </div>
+            <MonoBox>{`${paddingContrast.explanation}
+
+CRT output x = ${truncMiddle(paddingContrast.attack.crtValue.toString(16), 42)}
+integer cube root floor(∛x) = ${paddingContrast.attack.recovered}
+Recovered text attempt = ${paddingContrast.attack.recoveredText ?? "(not valid UTF-8)"}`}</MonoBox>
           </div>
         )}
       </div>

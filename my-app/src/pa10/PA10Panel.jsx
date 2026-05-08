@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // PA #10 — HMAC and HMAC-Based CCA Encryption (Interactive Demo)
+// Updated layout: every PA10 demo has a clearly labelled LEFT PANEL and RIGHT PANEL.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { Fragment, useMemo, useState } from "react";
@@ -89,6 +90,44 @@ function Banner({ ok, children }) {
       marginTop: 10,
     }}>
       {children}
+    </div>
+  );
+}
+
+function SideBySidePanels({ leftTitle, leftSubtitle, rightTitle, rightSubtitle, left, right }) {
+  const leftColor = { bg: "#E6F1FB", border: "#378ADD", text: "#185FA5" };
+  const rightColor = { bg: "#EEEDFE", border: "#7F77DD", text: "#3C3489" };
+
+  const panel = (side, title, subtitle, content, color) => (
+    <div style={{
+      border: `1px solid ${color.border}`,
+      borderRadius: "var(--border-radius-lg)",
+      overflow: "hidden",
+      background: "var(--color-background-primary)",
+      boxShadow: "0 2px 8px rgba(0, 0, 0, 0.04)",
+      minWidth: 0,
+    }}>
+      <div style={{ padding: "10px 14px", background: color.bg, borderBottom: `1px solid ${color.border}` }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: color.text, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          {side} PANEL — {title}
+        </div>
+        {subtitle && <div style={{ fontSize: 11, color: color.text, marginTop: 4, lineHeight: 1.45 }}>{subtitle}</div>}
+      </div>
+      <div style={{ padding: 14 }}>{content}</div>
+    </div>
+  );
+
+  return (
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+      gap: 16,
+      alignItems: "stretch",
+      marginTop: 12,
+      marginBottom: 12,
+    }}>
+      {panel("LEFT", leftTitle, leftSubtitle, left, leftColor)}
+      {panel("RIGHT", rightTitle, rightSubtitle, right, rightColor)}
     </div>
   );
 }
@@ -268,166 +307,236 @@ export default function PA10Panel() {
         {activeTab === "hmac" && (
           <div>
             <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 14, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
-              HMAC is built over your PA#8 DLP hash. The key is normalized to the PA#7 block size, then used once with ipad and once with opad.
+              HMAC is built over your PA#8 DLP hash. The left panel constructs the tag; the right panel verifies tags using constant-time comparison.
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-              <div>
-                <FieldLabel>HMAC key k (hex)</FieldLabel>
-                <TextInput value={hmacKey} onChange={setHmacKey} placeholder="a3f2c1b8" />
-              </div>
-              <div>
-                <FieldLabel>Message m (text)</FieldLabel>
-                <TextInput value={hmacMsg} onChange={setHmacMsg} placeholder="message" />
-              </div>
-            </div>
+            <SideBySidePanels
+              leftTitle="HMAC construction"
+              leftSubtitle="Enter k and m, then trace k⊕ipad, inner hash, k⊕opad, and final tag."
+              rightTitle="Verification + timing"
+              rightSubtitle="Supply a tag and compare naive early-exit verification with constant-time checking."
+              left={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12, marginBottom: 12 }}>
+                    <div>
+                      <FieldLabel>HMAC key k (hex)</FieldLabel>
+                      <TextInput value={hmacKey} onChange={setHmacKey} placeholder="a3f2c1b8" />
+                    </div>
+                    <div>
+                      <FieldLabel>Message m (text)</FieldLabel>
+                      <TextInput value={hmacMsg} onChange={setHmacMsg} placeholder="message" />
+                    </div>
+                  </div>
 
-            {hmacResult?.error ? <Banner ok={false}>{hmacResult.error}</Banner> : (
-              <>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8, marginBottom: 12 }}>
-                  <StatCard label="HMAC tag" value={`0x${hmacResult.tag}`} accent="#0F6E56" />
-                  <StatCard label="Inner hash" value={`0x${hmacResult.innerHash}`} />
-                  <StatCard label="Normalized key" value={`0x${hmacResult.keyHex}`} />
+                  {hmacResult?.error ? <Banner ok={false}>{hmacResult.error}</Banner> : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 8, marginBottom: 12 }}>
+                        <StatCard label="HMAC tag" value={`0x${hmacResult.tag}`} accent="#0F6E56" />
+                        <StatCard label="Inner hash" value={`0x${hmacResult.innerHash}`} />
+                        <StatCard label="Normalized key" value={`0x${hmacResult.keyHex}`} />
+                      </div>
+                      <HmacFlow result={hmacResult} />
+                      <SectionHeading>Left-panel construction trace</SectionHeading>
+                      <MonoBox maxH={190}>{[
+                        `k ⊕ ipad = 0x${hmacResult.innerKeyHex}`,
+                        `inner input = 0x${truncateMiddle(hmacResult.innerInputHex, 48)}`,
+                        `H(inner) = 0x${hmacResult.innerHash}`,
+                        `k ⊕ opad = 0x${hmacResult.outerKeyHex}`,
+                        `outer input = 0x${truncateMiddle(hmacResult.outerInputHex, 48)}`,
+                        `HMAC tag = 0x${hmacResult.tag}`,
+                      ].join("\n")}</MonoBox>
+                    </>
+                  )}
                 </div>
-                <HmacFlow result={hmacResult} />
-                <SectionHeading>Step values</SectionHeading>
-                <MonoBox maxH={180}>{[
-                  `k ⊕ ipad = 0x${hmacResult.innerKeyHex}`,
-                  `inner input = 0x${truncateMiddle(hmacResult.innerInputHex, 48)}`,
-                  `H(inner) = 0x${hmacResult.innerHash}`,
-                  `k ⊕ opad = 0x${hmacResult.outerKeyHex}`,
-                  `outer input = 0x${truncateMiddle(hmacResult.outerInputHex, 48)}`,
-                  `HMAC tag = 0x${hmacResult.tag}`,
-                ].join("\n")}</MonoBox>
-              </>
-            )}
+              }
+              right={
+                <div>
+                  <SectionHeading>Constant-time verification</SectionHeading>
+                  <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap", marginBottom: 10 }}>
+                    <div style={{ flex: "1 1 240px" }}>
+                      <FieldLabel>Supplied tag</FieldLabel>
+                      <TextInput value={verifyTag} onChange={setVerifyTag} placeholder="paste tag" />
+                    </div>
+                    <ActionButton onClick={copyTagToVerify} tone="purple">Use correct tag</ActionButton>
+                    <ActionButton onClick={runVerify}>Verify tag</ActionButton>
+                  </div>
+                  {verifyResult && !verifyResult.error && <Banner ok={verifyResult.valid}>{verifyResult.valid ? "Tag accepted ✓" : `Tag rejected. Expected 0x${verifyResult.expectedTag}`}</Banner>}
+                  {verifyResult?.error && <Banner ok={false}>{verifyResult.error}</Banner>}
 
-            <SectionHeading>Constant-time verification</SectionHeading>
-            <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap", marginBottom: 10 }}>
-              <div style={{ flex: "1 1 240px" }}>
-                <FieldLabel>Supplied tag</FieldLabel>
-                <TextInput value={verifyTag} onChange={setVerifyTag} placeholder="paste tag" />
-              </div>
-              <ActionButton onClick={copyTagToVerify} tone="purple">Use correct tag</ActionButton>
-              <ActionButton onClick={runVerify}>Verify tag</ActionButton>
-            </div>
-            {verifyResult && !verifyResult.error && <Banner ok={verifyResult.valid}>{verifyResult.valid ? "Tag accepted ✓" : `Tag rejected. Expected 0x${verifyResult.expectedTag}`}</Banner>}
-            {verifyResult?.error && <Banner ok={false}>{verifyResult.error}</Banner>}
-
-            <SectionHeading>Timing leak comparison</SectionHeading>
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", overflow: "hidden", fontSize: 11 }}>
-              {["Candidate", "Naive early-exit checks", "Constant-time byte checks"].map(h => <div key={h} style={{ padding: "7px 10px", background: "var(--color-background-secondary)", fontWeight: 500 }}>{h}</div>)}
-              {timingRows.map((r) => (
-                <Fragment key={r.label}>
-                  <div key={`${r.label}-a`} style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", borderTop: "0.5px solid var(--color-border-tertiary)" }}>{r.label}: 0x{r.candidate}</div>
-                  <div key={`${r.label}-b`} style={{ padding: "7px 10px", borderTop: "0.5px solid var(--color-border-tertiary)" }}>{r.naiveChecks}</div>
-                  <div key={`${r.label}-c`} style={{ padding: "7px 10px", borderTop: "0.5px solid var(--color-border-tertiary)" }}>{r.constantTimeChecks}</div>
-                </Fragment>
-              ))}
-            </div>
+                  <SectionHeading>Timing leak comparison</SectionHeading>
+                  <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", overflow: "hidden", fontSize: 11 }}>
+                    {["Candidate", "Naive early-exit checks", "Constant-time byte checks"].map(h => <div key={h} style={{ padding: "7px 10px", background: "var(--color-background-secondary)", fontWeight: 500 }}>{h}</div>)}
+                    {timingRows.map((r) => (
+                      <Fragment key={r.label}>
+                        <div style={{ padding: "7px 10px", fontFamily: "var(--font-mono)", borderTop: "0.5px solid var(--color-border-tertiary)" }}>{r.label}: 0x{r.candidate}</div>
+                        <div style={{ padding: "7px 10px", borderTop: "0.5px solid var(--color-border-tertiary)" }}>{r.naiveChecks}</div>
+                        <div style={{ padding: "7px 10px", borderTop: "0.5px solid var(--color-border-tertiary)" }}>{r.constantTimeChecks}</div>
+                      </Fragment>
+                    ))}
+                  </div>
+                </div>
+              }
+            />
           </div>
         )}
 
         {activeTab === "euf" && (
           <div>
             <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 14, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
-              CRHF ⇒ MAC: once DLP_Hash is available, HMAC becomes a secure MAC. The EUF-CMA demo gives the adversary signed messages, then checks whether a valid tag on a new message can be produced.
+              CRHF ⇒ MAC: once DLP_Hash is available, HMAC becomes a secure MAC. The left panel is the signing oracle; the right panel is the adversary trying to forge.
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 140px", gap: 10, marginBottom: 10 }}>
-              <div><FieldLabel>Hidden MAC key (hex)</FieldLabel><TextInput value={eufKey} onChange={setEufKey} placeholder="key" /></div>
-              <div><FieldLabel>Oracle queries</FieldLabel><TextInput value={pairCount} onChange={setPairCount} placeholder="50" /></div>
-            </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-              <ActionButton onClick={runGenPairs}>Generate signed pairs</ActionButton>
-              <ActionButton onClick={runEufGame} tone="purple">Run 20 random forgery attempts</ActionButton>
-              <ActionButton onClick={() => { setEufKey(randomHex(8)); setPairs(null); setGameResult(null); setForgeResult(null); }} tone="orange">Random key</ActionButton>
-            </div>
-
-            {pairs && !pairs[0]?.error && (
-              <>
-                <SectionHeading>Sample HMAC oracle outputs</SectionHeading>
-                <MonoBox maxH={110}>{pairs.slice(0, 8).map((p, i) => `${i + 1}. ${p.msg}  →  0x${p.tag}`).join("\n")}</MonoBox>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-                  <div><FieldLabel>Forged message m*</FieldLabel><TextInput value={forgeMsg} onChange={setForgeMsg} placeholder="new message" /></div>
-                  <div><FieldLabel>Forged tag t*</FieldLabel><TextInput value={forgeTag} onChange={setForgeTag} placeholder="deadbeef" /></div>
+            <SideBySidePanels
+              leftTitle="HMAC signing oracle"
+              leftSubtitle="Generate valid (message, tag) pairs under a hidden key."
+              rightTitle="EUF-CMA adversary"
+              rightSubtitle="Submit a tag for a new message and check if the forgery is accepted."
+              left={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 140px", gap: 10, marginBottom: 10 }}>
+                    <div><FieldLabel>Hidden MAC key (hex)</FieldLabel><TextInput value={eufKey} onChange={setEufKey} placeholder="key" /></div>
+                    <div><FieldLabel>Oracle queries</FieldLabel><TextInput value={pairCount} onChange={setPairCount} placeholder="50" /></div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                    <ActionButton onClick={runGenPairs}>Generate signed pairs</ActionButton>
+                    <ActionButton onClick={() => { setEufKey(randomHex(8)); setPairs(null); setGameResult(null); setForgeResult(null); }} tone="orange">Random key</ActionButton>
+                  </div>
+                  {pairs && !pairs[0]?.error && (
+                    <>
+                      <SectionHeading>Sample HMAC oracle outputs</SectionHeading>
+                      <MonoBox maxH={150}>{pairs.slice(0, 10).map((p, i) => `${i + 1}. ${p.msg}  →  0x${p.tag}`).join("\n")}</MonoBox>
+                    </>
+                  )}
+                  {pairs?.[0]?.error && <Banner ok={false}>{pairs[0].error}</Banner>}
                 </div>
-                <div style={{ marginTop: 10 }}><ActionButton onClick={runAttemptForgery} tone="red">Submit forgery</ActionButton></div>
-              </>
-            )}
-            {pairs?.[0]?.error && <Banner ok={false}>{pairs[0].error}</Banner>}
-            {forgeResult && !forgeResult.error && <Banner ok={forgeResult.accepted}>{forgeResult.reason} Expected tag: 0x{forgeResult.expectedTag}</Banner>}
-            {gameResult && !gameResult.error && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 8 }}>
-                  <StatCard label="Attempts" value={gameResult.attempts} />
-                  <StatCard label="Successes" value={gameResult.successes} accent={gameResult.successes === 0 ? "#0F6E56" : "#A32D2D"} />
-                  <StatCard label="Success rate" value={`${(gameResult.successRate * 100).toFixed(1)}%`} />
+              }
+              right={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <div><FieldLabel>Forged message m*</FieldLabel><TextInput value={forgeMsg} onChange={setForgeMsg} placeholder="new message" /></div>
+                    <div><FieldLabel>Forged tag t*</FieldLabel><TextInput value={forgeTag} onChange={setForgeTag} placeholder="deadbeef" /></div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+                    <ActionButton onClick={runAttemptForgery} disabled={!pairs} tone="red">Submit forgery</ActionButton>
+                    <ActionButton onClick={runEufGame} tone="purple">Run 20 random forgery attempts</ActionButton>
+                  </div>
+                  {forgeResult && !forgeResult.error && <Banner ok={forgeResult.accepted}>{forgeResult.reason} Expected tag: 0x{forgeResult.expectedTag}</Banner>}
+                  {gameResult && !gameResult.error && (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8 }}>
+                        <StatCard label="Attempts" value={gameResult.attempts} />
+                        <StatCard label="Successes" value={gameResult.successes} accent={gameResult.successes === 0 ? "#0F6E56" : "#A32D2D"} />
+                        <StatCard label="Success rate" value={`${(gameResult.successRate * 100).toFixed(1)}%`} />
+                      </div>
+                      <MonoBox maxH={130}>{gameResult.logs.map(l => `try ${l.i}: ${l.msg} / guessed 0x${l.guessedTag} / expected 0x${l.expectedTag} / accepted=${l.accepted}`).join("\n")}</MonoBox>
+                    </div>
+                  )}
+                  {gameResult?.error && <Banner ok={false}>{gameResult.error}</Banner>}
                 </div>
-                <MonoBox maxH={120}>{gameResult.logs.map(l => `try ${l.i}: ${l.msg} / guessed 0x${l.guessedTag} / expected 0x${l.expectedTag} / accepted=${l.accepted}`).join("\n")}</MonoBox>
-              </div>
-            )}
-            {gameResult?.error && <Banner ok={false}>{gameResult.error}</Banner>}
+              }
+            />
           </div>
         )}
 
         {activeTab === "crhf" && (
           <div>
             <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 14, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
-              MAC ⇒ CRHF: fix a key and use HMAC as the Merkle-Damgård compression step: zᵢ = HMACₖ(zᵢ₋₁ || Mᵢ). A collision here would imply a collision/forgery against the MAC compression function.
+              MAC ⇒ CRHF: fix a key and use HMAC as the Merkle-Damgård compression step: zᵢ = HMACₖ(zᵢ₋₁ || Mᵢ).
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-              <div><FieldLabel>Fixed HMAC key</FieldLabel><TextInput value={crhfKey} onChange={setCrhfKey} placeholder="key" /></div>
-              <div />
-              <div><FieldLabel>Message A</FieldLabel><TextInput value={crhfA} onChange={setCrhfA} placeholder="message A" /></div>
-              <div><FieldLabel>Message B</FieldLabel><TextInput value={crhfB} onChange={setCrhfB} placeholder="message B" /></div>
-            </div>
-            <ActionButton onClick={runCrhfDemo}>Build HMAC-MD hash</ActionButton>
-            {crhfResult && !crhfResult.error && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8, marginBottom: 10 }}>
-                  <StatCard label="HMAC-MD(A)" value={`0x${crhfResult.digestA}`} />
-                  <StatCard label="HMAC-MD(B)" value={`0x${crhfResult.digestB}`} />
-                  <StatCard label="Distinct?" value={crhfResult.distinct ? "YES ✓" : "NO"} accent={crhfResult.distinct ? "#0F6E56" : "#A32D2D"} />
+            <SideBySidePanels
+              leftTitle="HMAC compression setup"
+              leftSubtitle="Choose the fixed key and two candidate messages."
+              rightTitle="Derived CRHF output"
+              rightSubtitle="Different messages should produce different HMAC-MD digests."
+              left={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 10 }}>
+                    <div><FieldLabel>Fixed HMAC key</FieldLabel><TextInput value={crhfKey} onChange={setCrhfKey} placeholder="key" /></div>
+                    <div><FieldLabel>Message A</FieldLabel><TextInput value={crhfA} onChange={setCrhfA} placeholder="message A" /></div>
+                    <div><FieldLabel>Message B</FieldLabel><TextInput value={crhfB} onChange={setCrhfB} placeholder="message B" /></div>
+                  </div>
+                  <ActionButton onClick={runCrhfDemo}>Build HMAC-MD hash</ActionButton>
                 </div>
-                <MonoBox maxH={160}>{crhfResult.stepsA.map(s => `z${s.i}=0x${s.zIn}, M${s.i + 1}=0x${s.blockHex}  →  z${s.i + 1}=0x${s.zOut}`).join("\n")}</MonoBox>
-                <Banner ok={true}>{crhfResult.explanation}</Banner>
-              </div>
-            )}
-            {crhfResult?.error && <Banner ok={false}>{crhfResult.error}</Banner>}
+              }
+              right={
+                <div>
+                  {crhfResult && !crhfResult.error ? (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="HMAC-MD(A)" value={`0x${crhfResult.digestA}`} />
+                        <StatCard label="HMAC-MD(B)" value={`0x${crhfResult.digestB}`} />
+                        <StatCard label="Distinct?" value={crhfResult.distinct ? "YES ✓" : "NO"} accent={crhfResult.distinct ? "#0F6E56" : "#A32D2D"} />
+                      </div>
+                      <MonoBox maxH={170}>{crhfResult.stepsA.map(s => `z${s.i}=0x${s.zIn}, M${s.i + 1}=0x${s.blockHex}  →  z${s.i + 1}=0x${s.zOut}`).join("\n")}</MonoBox>
+                      <Banner ok={true}>{crhfResult.explanation}</Banner>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 12, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
+                      Click <strong>Build HMAC-MD hash</strong> in the left panel to see the derived CRHF chain and final digests.
+                    </div>
+                  )}
+                  {crhfResult?.error && <Banner ok={false}>{crhfResult.error}</Banner>}
+                </div>
+              }
+            />
           </div>
         )}
 
         {activeTab === "lenext" && (
           <div>
             <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 14, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
-              A naive MAC t = H(k || m) exposes the final Merkle-Damgård chaining value. Given a key-length guess, the attacker can resume hashing and authenticate m || pad || suffix. HMAC prevents this because the public tag is the output of a fresh outer keyed hash.
+              The left panel demonstrates the broken naive MAC t = H(k || m). The right panel shows why the same extension trick fails for HMAC.
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-              <div><FieldLabel>Secret key k (hex)</FieldLabel><TextInput value={leKey} onChange={setLeKey} placeholder="a3f2c1b8" /></div>
-              <div><FieldLabel>Guessed key length (bytes)</FieldLabel><TextInput value={leGuess} onChange={setLeGuess} placeholder="4" /></div>
-              <div><FieldLabel>Known message m</FieldLabel><TextInput value={leMsg} onChange={setLeMsg} placeholder="amount=100" /></div>
-              <div><FieldLabel>Attacker suffix</FieldLabel><TextInput value={leSuffix} onChange={setLeSuffix} placeholder="&admin=true" /></div>
-            </div>
-            <ActionButton onClick={runLenExt} tone="orange">Run length-extension attack</ActionButton>
-            {leResult && !leResult.error && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 8, marginBottom: 10 }}>
-                  <StatCard label="Naive original tag" value={`0x${leResult.originalNaiveTag}`} />
-                  <StatCard label="Attacker forged tag" value={`0x${leResult.attackerForgedTag}`} />
-                  <StatCard label="Server recomputed tag" value={`0x${leResult.serverNaiveTag}`} />
-                  <StatCard label="Naive attack works?" value={leResult.naiveAttackWorks ? "YES ✓" : "NO"} accent={leResult.naiveAttackWorks ? "#0F6E56" : "#A32D2D"} />
-                  <StatCard label="HMAC attack works?" value={leResult.hmacAttackWorks ? "YES" : "NO ✓"} accent={leResult.hmacAttackWorks ? "#A32D2D" : "#0F6E56"} />
+            <SideBySidePanels
+              leftTitle="Broken naive H(k || m)"
+              leftSubtitle="The attacker resumes Merkle-Damgård hashing from the exposed tag."
+              rightTitle="HMAC defeats extension"
+              rightSubtitle="The public tag is protected by the outer keyed hash."
+              left={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 10 }}>
+                    <div><FieldLabel>Secret key k (hex)</FieldLabel><TextInput value={leKey} onChange={setLeKey} placeholder="a3f2c1b8" /></div>
+                    <div><FieldLabel>Guessed key length (bytes)</FieldLabel><TextInput value={leGuess} onChange={setLeGuess} placeholder="4" /></div>
+                    <div><FieldLabel>Known message m</FieldLabel><TextInput value={leMsg} onChange={setLeMsg} placeholder="amount=100" /></div>
+                    <div><FieldLabel>Attacker suffix</FieldLabel><TextInput value={leSuffix} onChange={setLeSuffix} placeholder="&admin=true" /></div>
+                  </div>
+                  <ActionButton onClick={runLenExt} tone="orange">Run length-extension attack</ActionButton>
+
+                  {leResult && !leResult.error && (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="Naive original tag" value={`0x${leResult.originalNaiveTag}`} />
+                        <StatCard label="Attacker forged tag" value={`0x${leResult.attackerForgedTag}`} />
+                        <StatCard label="Server recomputed" value={`0x${leResult.serverNaiveTag}`} />
+                        <StatCard label="Naive attack works?" value={leResult.naiveAttackWorks ? "YES ✓" : "NO"} accent={leResult.naiveAttackWorks ? "#0F6E56" : "#A32D2D"} />
+                      </div>
+                      <HexLine label="Glue padding" value={`0x${leResult.gluePadHex}`} />
+                      <HexLine label="Forged public msg" value={`0x${truncateMiddle(leResult.forgedPublicMessageHex, 52)}`} />
+                    </div>
+                  )}
+                  {leResult?.error && <Banner ok={false}>{leResult.error}</Banner>}
                 </div>
-                <HexLine label="Glue padding" value={`0x${leResult.gluePadHex}`} />
-                <HexLine label="Forged public msg" value={`0x${truncateMiddle(leResult.forgedPublicMessageHex, 52)}`} />
-                <HexLine label="Real HMAC forged msg" value={`0x${leResult.realHmacOnForgedMsg}`} />
-                <HexLine label="Attacker HMAC attempt" value={`0x${leResult.attackerHmacAttempt}`} />
-                <Banner ok={leResult.naiveAttackWorks && !leResult.hmacAttackWorks}>
-                  Naive H(k||m) was extended successfully, but the same resume trick fails against HMAC.
-                </Banner>
-              </div>
-            )}
-            {leResult?.error && <Banner ok={false}>{leResult.error}</Banner>}
+              }
+              right={
+                <div>
+                  {leResult && !leResult.error ? (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="Real HMAC forged msg" value={`0x${leResult.realHmacOnForgedMsg}`} />
+                        <StatCard label="Attacker HMAC attempt" value={`0x${leResult.attackerHmacAttempt}`} />
+                        <StatCard label="HMAC attack works?" value={leResult.hmacAttackWorks ? "YES" : "NO ✓"} accent={leResult.hmacAttackWorks ? "#A32D2D" : "#0F6E56"} />
+                      </div>
+                      <Banner ok={leResult.naiveAttackWorks && !leResult.hmacAttackWorks}>
+                        Naive H(k||m) was extended successfully, but the same resume trick fails against HMAC.
+                      </Banner>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 12, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
+                      Run the attack from the left panel. This side will show the HMAC comparison: actual HMAC on the forged message vs the attacker's invalid attempt.
+                    </div>
+                  )}
+                </div>
+              }
+            />
           </div>
         )}
 
@@ -444,64 +553,90 @@ export default function PA10Panel() {
               ]} />
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-              <div><FieldLabel>Encryption key kE</FieldLabel><TextInput value={kE} onChange={setKE} placeholder="c0ffee11" /></div>
-              <div><FieldLabel>HMAC key kM</FieldLabel><TextInput value={kM} onChange={setKM} placeholder="a3f2..." /></div>
-              <div><FieldLabel>Plaintext m (hex)</FieldLabel><TextInput value={plainHex} onChange={setPlainHex} placeholder="deadbeef" /></div>
-              <div style={{ display: "flex", alignItems: "end", gap: 10 }}>
-                <ActionButton onClick={runEncrypt}>Encrypt + decrypt</ActionButton>
-                <ActionButton onClick={runTamper} tone="red">Tamper bit</ActionButton>
-              </div>
-            </div>
+            <SideBySidePanels
+              leftTitle="CPA-only encryption"
+              leftSubtitle="Shows why plain PA#3 encryption is malleable when ciphertext bits are changed."
+              rightTitle="Encrypt-then-HMAC"
+              rightSubtitle="Authenticates C_E first; tampering is rejected before decryption."
+              left={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 10 }}>
+                    <div><FieldLabel>Encryption key kE</FieldLabel><TextInput value={kE} onChange={setKE} placeholder="c0ffee11" /></div>
+                    <div><FieldLabel>Plaintext m (hex)</FieldLabel><TextInput value={plainHex} onChange={setPlainHex} placeholder="deadbeef" /></div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <ActionButton onClick={runEncrypt}>Encrypt + decrypt</ActionButton>
+                    <ActionButton onClick={runTamper} tone="red">Tamper bit</ActionButton>
+                  </div>
 
-            {encResult?.error && <Banner ok={false}>{encResult.error}</Banner>}
-            {encResult && !encResult.error && (
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8, marginBottom: 10 }}>
-                  <StatCard label="C_E = r:c" value={truncateMiddle(encResult.CE, 28)} />
-                  <StatCard label="HMAC tag" value={`0x${encResult.tag}`} />
-                  <StatCard label="Decryption" value={decResult?.accepted ? `accepted: 0x${decResult.plaintext}` : "rejected"} accent={decResult?.accepted ? "#0F6E56" : "#A32D2D"} />
+                  {tamperResult && !tamperResult.error && (
+                    <div style={{ marginTop: 12 }}>
+                      <SectionHeading>CPA-only malleability</SectionHeading>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="CPA-only decrypts" value={`0x${tamperResult.cpaPlaintext}`} accent="#A32D2D" />
+                        <StatCard label="Tampered CE" value={truncateMiddle(tamperResult.tamperedCE, 26)} />
+                      </div>
+                      <Banner ok={false}>Without authentication, the modified ciphertext still decrypts to a modified plaintext.</Banner>
+                    </div>
+                  )}
                 </div>
-                <MonoBox maxH={120}>{[
-                  `CE = ${encResult.CE}`,
-                  `MAC input bytes = 0x${truncateMiddle(encResult.macInputHex, 50)}`,
-                  `tag = 0x${encResult.tag}`,
-                  `dec = ${decResult?.reason}`,
-                ].join("\n")}</MonoBox>
-              </div>
-            )}
+              }
+              right={
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 10 }}>
+                    <div><FieldLabel>HMAC key kM</FieldLabel><TextInput value={kM} onChange={setKM} placeholder="a3f2..." /></div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 110px", gap: 10 }}>
+                      <div><FieldLabel>m0 (hex)</FieldLabel><TextInput value={m0} onChange={setM0} placeholder="aaaaaaaa" /></div>
+                      <div><FieldLabel>m1 (hex)</FieldLabel><TextInput value={m1} onChange={setM1} placeholder="bbbbbbbb" /></div>
+                      <div><FieldLabel>Rounds</FieldLabel><TextInput value={rounds} onChange={setRounds} placeholder="50" /></div>
+                    </div>
+                  </div>
 
-            {tamperResult && !tamperResult.error && (
-              <div style={{ marginTop: 12 }}>
-                <SectionHeading>Malleability blocked by HMAC</SectionHeading>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8, marginBottom: 10 }}>
-                  <StatCard label="CPA-only decrypts" value={`0x${tamperResult.cpaPlaintext}`} accent="#A32D2D" />
-                  <StatCard label="HMAC-CCA accepts?" value={tamperResult.hmacAccepted ? "YES" : "NO ✓"} accent={tamperResult.hmacAccepted ? "#A32D2D" : "#0F6E56"} />
-                  <StatCard label="Tampered CE" value={truncateMiddle(tamperResult.tamperedCE, 26)} />
-                </div>
-                <Banner ok={!tamperResult.hmacAccepted}>{tamperResult.hmacReason}</Banner>
-              </div>
-            )}
-            {tamperResult?.error && <Banner ok={false}>{tamperResult.error}</Banner>}
+                  {encResult?.error && <Banner ok={false}>{encResult.error}</Banner>}
+                  {encResult && !encResult.error && (
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="C_E = r:c" value={truncateMiddle(encResult.CE, 28)} />
+                        <StatCard label="HMAC tag" value={`0x${encResult.tag}`} />
+                        <StatCard label="Decryption" value={decResult?.accepted ? `accepted: 0x${decResult.plaintext}` : "rejected"} accent={decResult?.accepted ? "#0F6E56" : "#A32D2D"} />
+                      </div>
+                      <MonoBox maxH={120}>{[
+                        `CE = ${encResult.CE}`,
+                        `MAC input bytes = 0x${truncateMiddle(encResult.macInputHex, 50)}`,
+                        `tag = 0x${encResult.tag}`,
+                        `dec = ${decResult?.reason}`,
+                      ].join("\n")}</MonoBox>
+                    </div>
+                  )}
 
-            <SectionHeading>IND-CCA2 game simulation</SectionHeading>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 120px", gap: 10, marginBottom: 10 }}>
-              <div><FieldLabel>m0 (hex)</FieldLabel><TextInput value={m0} onChange={setM0} placeholder="aaaaaaaa" /></div>
-              <div><FieldLabel>m1 (hex)</FieldLabel><TextInput value={m1} onChange={setM1} placeholder="bbbbbbbb" /></div>
-              <div><FieldLabel>Rounds</FieldLabel><TextInput value={rounds} onChange={setRounds} placeholder="50" /></div>
-            </div>
-            <ActionButton onClick={runGame} tone="purple">Run CCA2 game</ActionButton>
-            {ccaGame && !ccaGame.error && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 8, marginBottom: 10 }}>
-                  <StatCard label="Rounds" value={ccaGame.rounds} />
-                  <StatCard label="Correct guesses" value={ccaGame.correct} />
-                  <StatCard label="Advantage" value={ccaGame.advantage.toFixed(3)} />
+                  {tamperResult && !tamperResult.error && (
+                    <div style={{ marginTop: 12 }}>
+                      <SectionHeading>HMAC blocks malleability</SectionHeading>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="HMAC-CCA accepts?" value={tamperResult.hmacAccepted ? "YES" : "NO ✓"} accent={tamperResult.hmacAccepted ? "#A32D2D" : "#0F6E56"} />
+                        <StatCard label="Tampered CE" value={truncateMiddle(tamperResult.tamperedCE, 26)} />
+                      </div>
+                      <Banner ok={!tamperResult.hmacAccepted}>{tamperResult.hmacReason}</Banner>
+                    </div>
+                  )}
+                  {tamperResult?.error && <Banner ok={false}>{tamperResult.error}</Banner>}
+
+                  <SectionHeading>IND-CCA2 game simulation</SectionHeading>
+                  <ActionButton onClick={runGame} tone="purple">Run CCA2 game</ActionButton>
+                  {ccaGame && !ccaGame.error && (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8, marginBottom: 10 }}>
+                        <StatCard label="Rounds" value={ccaGame.rounds} />
+                        <StatCard label="Correct guesses" value={ccaGame.correct} />
+                        <StatCard label="Advantage" value={ccaGame.advantage.toFixed(3)} />
+                      </div>
+                      <MonoBox maxH={120}>{ccaGame.log.map(l => `round ${l.i}: b=${l.b}, guess=${l.guess}, win=${l.win}, tampered accepted=${l.tamperedAccepted}`).join("\n")}</MonoBox>
+                    </div>
+                  )}
+                  {ccaGame?.error && <Banner ok={false}>{ccaGame.error}</Banner>}
                 </div>
-                <MonoBox maxH={120}>{ccaGame.log.map(l => `round ${l.i}: b=${l.b}, guess=${l.guess}, win=${l.win}, tampered accepted=${l.tamperedAccepted}`).join("\n")}</MonoBox>
-              </div>
-            )}
-            {ccaGame?.error && <Banner ok={false}>{ccaGame.error}</Banner>}
+              }
+            />
           </div>
         )}
       </div>

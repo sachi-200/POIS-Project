@@ -222,6 +222,46 @@ export function malleabilityDemo(keys, messageValue, factor = 2n) {
   };
 }
 
+
+/**
+ * Run the required malleability trick many times and count successes.
+ * The attack should succeed every time because ElGamal is multiplicatively
+ * homomorphic in the second ciphertext component:
+ *   Dec(c1, factor*c2 mod p) = factor*m mod p.
+ */
+export function malleabilityCounterDemo(keys, messageValue, trials = 20, factor = 2n) {
+  const total = Math.max(1, Math.min(Number.parseInt(trials, 10) || 20, 1000));
+  let successes = 0;
+  const log = [];
+
+  for (let i = 0; i < total; i++) {
+    const result = malleabilityDemo(keys, messageValue, factor);
+    if (result.pass) successes++;
+
+    if (i < 10) {
+      log.push({
+        round: i + 1,
+        message: result.message,
+        c1: result.original.c1,
+        c2: result.original.c2,
+        modifiedC2: result.modified.c2,
+        decrypted: result.modifiedDec.m,
+        expected: result.expected,
+        pass: result.pass,
+      });
+    }
+  }
+
+  return {
+    trials: total,
+    successes,
+    failures: total - successes,
+    successRate: successes / total,
+    allPassed: successes === total,
+    log,
+  };
+}
+
 // ── IND-CPA simulation ───────────────────────────────────────────────────────
 
 export function runIndCpaSimulation(keys, m0Value, m1Value, rounds = 50) {

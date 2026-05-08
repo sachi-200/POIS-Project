@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // PA #15 — Digital Signatures (Interactive Demo)
+// Updated: explicit Verify button + Raw RSA / Hash-then-sign toggle
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { useState } from "react";
@@ -9,7 +10,8 @@ import {
   privateKey,
   Sign,
   Verify,
-  verifyTampered,
+  rawRsaSign,
+  rawRsaVerify,
   rawMultiplicativeForgeryDemo,
   hashThenSignForgeryContrast,
   runEufCmaGame,
@@ -22,6 +24,7 @@ import {
   TextInput,
   MonoBox,
   TestBadge,
+  ToggleBar,
 } from "../shared/ui.jsx";
 
 function StatCard({ label, value, accent }) {
@@ -56,6 +59,7 @@ function ActionButton({ children, onClick, disabled, tone = "purple" }) {
         color: disabled ? "#85827A" : palette.text,
         cursor: disabled ? "default" : "pointer",
         fontFamily: "var(--font-sans)",
+        whiteSpace: "nowrap",
       }}
     >
       {children}
@@ -65,18 +69,52 @@ function ActionButton({ children, onClick, disabled, tone = "purple" }) {
 
 function HexLine({ label, value }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "145px 1fr", gap: 8, fontSize: 11, marginBottom: 4 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "150px 1fr", gap: 8, fontSize: 11, marginBottom: 4 }}>
       <span style={{ color: "var(--color-text-secondary)" }}>{label}</span>
       <span style={{ fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{value}</span>
     </div>
   );
 }
 
-function parseBigIntInput(value, fallback) {
+function parseBigIntInput(value, fallback = 0n) {
   const clean = String(value || "").trim();
   if (!clean) return BigInt(fallback);
   if (/^0x[0-9a-fA-F]+$/.test(clean)) return BigInt(clean);
-  return BigInt(clean);
+  if (/^[0-9]+$/.test(clean)) return BigInt(clean);
+  throw new Error("Raw RSA mode expects the message to be an integer, e.g. 42 or 0x2a.");
+}
+
+function parseSignatureHex(value) {
+  const clean = String(value || "").trim().replace(/^0x/i, "").replace(/\s+/g, "");
+  if (!clean) throw new Error("Enter a signature first, or click Sign to populate it.");
+  if (!/^[0-9a-fA-F]+$/.test(clean)) throw new Error("Signature must be hex.");
+  return BigInt("0x" + clean);
+}
+
+function ModeBanner({ mode }) {
+  const raw = mode === "raw";
+  return (
+    <div style={{
+      padding: "10px 14px",
+      borderRadius: "var(--border-radius-md)",
+      background: raw ? "#FEF3E2" : "#E1F5EE",
+      border: `0.5px solid ${raw ? "#E8A820" : "#1D9E75"}`,
+      color: raw ? "#7A5200" : "#0F6E56",
+      fontSize: 11,
+      lineHeight: 1.7,
+      marginBottom: 12,
+    }}>
+      {raw ? (
+        <>
+          <strong>Raw RSA signing mode.</strong> This signs the message integer directly: σ = m<sup>d</sup> mod N. It is intentionally broken and is shown only to demonstrate multiplicative forgery.
+        </>
+      ) : (
+        <>
+          <strong>Secure hash-then-sign mode.</strong> This signs the PA#8 DLP hash of the message: σ = H(m)<sup>d</sup> mod N.
+        </>
+      )}
+    </div>
+  );
 }
 
 export default function PA15Panel() {
@@ -87,8 +125,10 @@ export default function PA15Panel() {
   const [keys, setKeys] = useState(null);
   const [generating, setGenerating] = useState(false);
 
-  // ── Sign/verify state ─────────────────────────────────────────────────────
+  // ── Live sign/verify state ───────────────────────────────────────────────
+  const [signMode, setSignMode] = useState("hash");
   const [message, setMessage] = useState("Sign this POIS message");
+  const [signatureHex, setSignatureHex] = useState("");
   const [signature, setSignature] = useState(null);
   const [verifyResult, setVerifyResult] = useState(null);
   const [tamperResult, setTamperResult] = useState(null);
@@ -104,11 +144,23 @@ export default function PA15Panel() {
   const [queryCount, setQueryCount] = useState("50");
   const [eufResult, setEufResult] = useState(null);
 
-  function generateKeys() {
-    setGenerating(true);
+  function resetLiveOutputs() {
     setSignature(null);
+    setSignatureHex("");
     setVerifyResult(null);
     setTamperResult(null);
+  }
+
+  function switchMode(mode) {
+    setSignMode(mode);
+    resetLiveOutputs();
+    if (mode === "raw") setMessage("42");
+    else setMessage("Sign this POIS message");
+  }
+
+  function generateKeys() {
+    setGenerating(true);
+    resetLiveOutputs();
     setRawForgery(null);
     setHashContrast(null);
     setEufResult(null);
@@ -128,32 +180,63 @@ export default function PA15Panel() {
     setRunning(true);
     setTimeout(() => {
       try {
-        const sig = Sign(privateKey(keys), message, SIGNATURE_HASH_PARAMS);
-        const vr = Verify(publicKey(keys), message, sig.sigma, SIGNATURE_HASH_PARAMS);
-        setSignature(sig);
-        setVerifyResult(vr);
+        if (signMode === "raw") {
+          const m = parseBigIntInput(message, 42n);
+          const sig = rawRsaSign(privateKey(keys), m);
+          const vr = rawRsaVerify(publicKey(keys), m, sig.sigma);
+          setSignature({ mode: "raw", ...sig });
+          setSignatureHex(sig.sigmaHex);
+          setVerifyResult({ mode: "raw", ...vr });
+        } else {
+          const sig = Sign(privateKey(keys), message, SIGNATURE_HASH_PARAMS);
+          const vr = Verify(publicKey(keys), message, sig.sigma, SIGNATURE_HASH_PARAMS);
+          setSignature({ mode: "hash", ...sig });
+          setSignatureHex(sig.sigmaHex);
+          setVerifyResult({ mode: "hash", ...vr });
+        }
         setTamperResult(null);
       } catch (e) {
         setSignature({ error: e.message });
         setVerifyResult(null);
+        setTamperResult(null);
       }
       setRunning(false);
     }, 10);
   }
 
   function verifyCurrent() {
-    if (!keys || keys.error || !signature || signature.error) return;
+    if (!keys || keys.error) return;
     try {
-      setVerifyResult(Verify(publicKey(keys), message, signature.sigma, SIGNATURE_HASH_PARAMS));
+      const sigma = parseSignatureHex(signatureHex);
+      if (signMode === "raw") {
+        const m = parseBigIntInput(message, 42n);
+        setVerifyResult({ mode: "raw", ...rawRsaVerify(publicKey(keys), m, sigma) });
+      } else {
+        setVerifyResult({ mode: "hash", ...Verify(publicKey(keys), message, sigma, SIGNATURE_HASH_PARAMS) });
+      }
     } catch (e) {
       setVerifyResult({ error: e.message });
     }
   }
 
   function tamperAndVerify() {
-    if (!keys || keys.error || !signature || signature.error) return;
+    if (!keys || keys.error) return;
     try {
-      setTamperResult(verifyTampered(keys, message, signature.sigma, SIGNATURE_HASH_PARAMS));
+      const sigma = parseSignatureHex(signatureHex);
+      if (signMode === "raw") {
+        const original = parseBigIntInput(message, 42n);
+        const tamperedMessage = (original + 1n) % keys.N;
+        const verification = rawRsaVerify(publicKey(keys), tamperedMessage, sigma);
+        setTamperResult({ mode: "raw", tamperedMessage: tamperedMessage.toString(), verification });
+      } else {
+        // Inline the tamper operation so the Verify button and Tamper button use the same manual signature field.
+        const bytes = new TextEncoder().encode(String(message));
+        const out = bytes.length ? new Uint8Array(bytes) : new Uint8Array([0]);
+        out[0] = out[0] ^ 0x01;
+        const tamperedMessage = new TextDecoder().decode(out);
+        const verification = Verify(publicKey(keys), tamperedMessage, sigma, SIGNATURE_HASH_PARAMS);
+        setTamperResult({ mode: "hash", tamperedMessage, verification });
+      }
     } catch (e) {
       setTamperResult({ error: e.message });
     }
@@ -189,6 +272,9 @@ export default function PA15Panel() {
     }, 10);
   }
 
+  const liveValid = verifyResult && !verifyResult.error ? verifyResult.valid : false;
+  const tamperInvalid = tamperResult && !tamperResult.error ? !tamperResult.verification.valid : false;
+
   return (
     <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
       <div style={{ padding: "10px 16px", background: hdr.bg, borderBottom: `0.5px solid ${hdr.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
@@ -196,13 +282,13 @@ export default function PA15Panel() {
           PA #15 — Digital Signatures
         </div>
         <div style={{ fontSize: 10, color: hdr.text, fontFamily: "var(--font-mono)" }}>
-          σ = H(m)^d mod N · verify σ^e ?= H(m)
+          secure: σ = H(m)^d · raw: σ = m^d
         </div>
       </div>
 
       <div style={{ padding: 16 }}>
         <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 14, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
-          This panel implements RSA hash-then-sign using PA#12 RSA and PA#8 DLP_Hash. Raw RSA signatures are shown only as a broken construction because the multiplicative property lets an attacker forge signatures.
+          This panel now has an explicit <strong>Verify</strong> workflow and a <strong>Raw RSA sign toggle</strong>. Use hash-then-sign for the secure construction, and switch to raw RSA to see why signing without hashing is broken.
         </div>
 
         {/* ═══ Key generation ═══ */}
@@ -230,47 +316,100 @@ export default function PA15Panel() {
         )}
 
         {/* ═══ Sign and verify ═══ */}
-        <SectionHeading>Live sign and verify</SectionHeading>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 10, alignItems: "end", marginBottom: 12 }}>
-          <div>
-            <FieldLabel>Message</FieldLabel>
-            <TextInput value={message} onChange={setMessage} placeholder="Message to sign" />
+        <SectionHeading>Live sign and explicit verify</SectionHeading>
+        <div style={{ marginBottom: 12 }}>
+          <FieldLabel>Signature mode</FieldLabel>
+          <ToggleBar value={signMode} onChange={switchMode} options={[
+            { value: "hash", label: "Hash-then-sign (secure)", activeStyle: { bg: "#E1F5EE", border: "#1D9E75", color: "#0F6E56" } },
+            { value: "raw", label: "Raw RSA sign (broken)", activeStyle: { bg: "#FEF3E2", border: "#E8A820", color: "#7A5200" } },
+          ]} />
+        </div>
+
+        <ModeBanner mode={signMode} />
+
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) minmax(220px,1fr)", gap: 12, marginBottom: 12 }}>
+          <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", padding: 12 }}>
+            <div style={{ fontSize: 10, color: signMode === "raw" ? "#7A5200" : "#0F6E56", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 10 }}>
+              1. Sign
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <FieldLabel>{signMode === "raw" ? "Message integer m" : "Message m"}</FieldLabel>
+              <TextInput value={message} onChange={(v) => { setMessage(v); setVerifyResult(null); setTamperResult(null); }} placeholder={signMode === "raw" ? "42" : "Message to sign"} />
+            </div>
+            <ActionButton onClick={signMessage} disabled={!keys || keys.error || running} tone="green">
+              {signMode === "raw" ? "Raw RSA Sign" : "Hash-then-Sign"}
+            </ActionButton>
           </div>
-          <ActionButton onClick={signMessage} disabled={!keys || keys.error || running} tone="green">Sign</ActionButton>
-          <ActionButton onClick={verifyCurrent} disabled={!signature || signature.error || !keys || keys.error}>Verify</ActionButton>
-          <ActionButton onClick={tamperAndVerify} disabled={!signature || signature.error || !keys || keys.error} tone="red">Tamper</ActionButton>
+
+          <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", padding: 12 }}>
+            <div style={{ fontSize: 10, color: "#3C3489", textTransform: "uppercase", letterSpacing: ".07em", marginBottom: 10 }}>
+              2. Verify manually
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <FieldLabel>Signature σ / hex</FieldLabel>
+              <TextInput value={signatureHex} onChange={(v) => { setSignatureHex(v); setVerifyResult(null); setTamperResult(null); }} placeholder="Click Sign or paste a signature hex" />
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <ActionButton onClick={verifyCurrent} disabled={!keys || keys.error || running}>Verify</ActionButton>
+              <ActionButton onClick={tamperAndVerify} disabled={!keys || keys.error || running} tone="red">Tamper + Verify</ActionButton>
+            </div>
+          </div>
         </div>
 
         {signature?.error && <MonoBox>{signature.error}</MonoBox>}
+        {verifyResult?.error && <MonoBox>{verifyResult.error}</MonoBox>}
+
         {signature && !signature.error && (
           <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", padding: 12, marginBottom: 14 }}>
-            <HexLine label="DLP_Hash(m)" value={`0x${signature.hash.digestHex}`} />
-            <HexLine label="H(m) mod N" value={`0x${signature.hash.hInt.toString(16)}`} />
-            <HexLine label="Signature σ" value={`0x${signature.sigmaHex}`} />
-            {verifyResult && !verifyResult.error && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 4, fontWeight: 500, background: signMode === "raw" ? "#FEF3E2" : "#E1F5EE", border: `0.5px solid ${signMode === "raw" ? "#E8A820" : "#1D9E75"}`, color: signMode === "raw" ? "#7A5200" : "#0F6E56" }}>
+                {signMode === "raw" ? "RAW RSA" : "HASH-THEN-SIGN"}
+              </span>
+              {verifyResult && !verifyResult.error && <TestBadge pass={liveValid} />}
+              {verifyResult && !verifyResult.error && (
+                <span style={{ fontSize: 12, color: liveValid ? "#0F6E56" : "#A32D2D" }}>
+                  {liveValid ? "Verify accepted the signature." : "Verify rejected the signature."}
+                </span>
+              )}
+            </div>
+
+            {signature.mode === "hash" ? (
               <>
-                <HexLine label="σ^e mod N" value={`0x${verifyResult.lhsHex}`} />
-                <HexLine label="Expected H(m)" value={`0x${verifyResult.rhsHex}`} />
-                <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
-                  <TestBadge pass={verifyResult.valid} />
-                  <span style={{ fontSize: 12, color: verifyResult.valid ? "#0F6E56" : "#A32D2D" }}>
-                    {verifyResult.valid ? "Valid signature" : "Invalid signature"}
-                  </span>
-                </div>
+                <HexLine label="DLP_Hash(m)" value={`0x${signature.hash.digestHex}`} />
+                <HexLine label="H(m) mod N" value={`0x${signature.hash.hInt.toString(16)}`} />
+                <HexLine label="Signature σ" value={`0x${signature.sigmaHex}`} />
+                {verifyResult && !verifyResult.error && verifyResult.mode === "hash" && (
+                  <>
+                    <HexLine label="σ^e mod N" value={`0x${verifyResult.lhsHex}`} />
+                    <HexLine label="Expected H(m)" value={`0x${verifyResult.rhsHex}`} />
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <HexLine label="Raw message m" value={signature.m.toString()} />
+                <HexLine label="Signature σ" value={`0x${signature.sigmaHex}`} />
+                {verifyResult && !verifyResult.error && verifyResult.mode === "raw" && (
+                  <>
+                    <HexLine label="σ^e mod N" value={verifyResult.recovered.toString()} />
+                    <HexLine label="Expected m" value={verifyResult.expected.toString()} />
+                  </>
+                )}
               </>
             )}
           </div>
         )}
 
+        {tamperResult?.error && <MonoBox>{tamperResult.error}</MonoBox>}
         {tamperResult && !tamperResult.error && (
           <div style={{ padding: "10px 12px", borderRadius: "var(--border-radius-md)", background: "#FCEBEB", border: "0.5px solid #E24B4A", marginBottom: 16 }}>
             <div style={{ fontSize: 11, color: "#A32D2D", marginBottom: 6 }}>
-              Tampered message after one-bit flip: <span style={{ fontFamily: "var(--font-mono)" }}>{JSON.stringify(tamperResult.tamperedMessage)}</span>
+              Tampered message: <span style={{ fontFamily: "var(--font-mono)" }}>{JSON.stringify(tamperResult.tamperedMessage)}</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <TestBadge pass={!tamperResult.verification.valid} />
-              <span style={{ fontSize: 12, color: "#A32D2D" }}>
-                Verification fails after tampering, as required.
+              <TestBadge pass={tamperInvalid} />
+              <span style={{ fontSize: 12, color: tamperInvalid ? "#0F6E56" : "#A32D2D" }}>
+                {tamperInvalid ? "The old signature fails on the tampered message." : "Unexpectedly accepted after tampering."}
               </span>
             </div>
           </div>
@@ -279,7 +418,7 @@ export default function PA15Panel() {
         {/* ═══ Raw RSA forgery ═══ */}
         <SectionHeading>Raw RSA multiplicative forgery</SectionHeading>
         <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "#FAEEDA", border: "0.5px solid #BA7517", marginBottom: 12, fontSize: 11, color: "#633806", lineHeight: 1.7 }}>
-          Raw RSA signing is broken: from signatures on m₁ and m₂, an attacker computes σ* = σ₁·σ₂ mod N, which verifies as a signature on m₁·m₂ mod N without using the private key.
+          Raw RSA signing is broken: from signatures on m₁ and m₂, an attacker computes σ* = σ₁·σ₂ mod N, which verifies as a signature on m₁·m₂ mod N without using the private key. The green panel shows why hash-then-sign blocks the same trick.
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "160px 160px auto", gap: 10, alignItems: "end", marginBottom: 12 }}>
           <div>

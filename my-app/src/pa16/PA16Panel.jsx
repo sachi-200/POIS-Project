@@ -9,6 +9,7 @@ import {
   encryptDecryptDemo,
   randomizedEncryptionDemo,
   malleabilityDemo,
+  malleabilityCounterDemo,
   runIndCpaSimulation,
   sampleDdhTuples,
   truncMiddle,
@@ -74,6 +75,11 @@ function BigLine({ label, value }) {
   return <HexLine label={label} value={typeof value === "bigint" ? value.toString() : value} />;
 }
 
+function percent(value) {
+  if (!Number.isFinite(value)) return "—";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
 export default function PA16Panel() {
   const hdr = { bg: "#E8F8F3", border: "#20A47B", text: "#0F6E56" };
 
@@ -89,6 +95,11 @@ export default function PA16Panel() {
   const [malleability, setMalleability] = useState(null);
   const [running, setRunning] = useState(false);
 
+  // ── Malleability success-counter state ────────────────────────────────────
+  const [trickTrials, setTrickTrials] = useState("20");
+  const [trickCounter, setTrickCounter] = useState({ attempts: 0, successes: 0 });
+  const [trickBatch, setTrickBatch] = useState(null);
+
   // ── IND-CPA state ─────────────────────────────────────────────────────────
   const [m0, setM0] = useState("11111");
   const [m1, setM1] = useState("22222");
@@ -98,6 +109,11 @@ export default function PA16Panel() {
   // ── DDH tuple state ───────────────────────────────────────────────────────
   const [ddh, setDdh] = useState(null);
 
+  function resetTrickCounter() {
+    setTrickCounter({ attempts: 0, successes: 0 });
+    setTrickBatch(null);
+  }
+
   function generateKeys() {
     setGenerating(true);
     setEncResult(null);
@@ -105,6 +121,7 @@ export default function PA16Panel() {
     setMalleability(null);
     setCpaResult(null);
     setDdh(null);
+    resetTrickCounter();
     setTimeout(() => {
       try {
         const x = secretOverride.trim() ? BigInt(secretOverride.trim()) : null;
@@ -147,9 +164,32 @@ export default function PA16Panel() {
     setRunning(true);
     setTimeout(() => {
       try {
-        setMalleability(malleabilityDemo(keys, message, 2n));
+        const result = malleabilityDemo(keys, message, 2n);
+        setMalleability(result);
+        setTrickCounter((prev) => ({
+          attempts: prev.attempts + 1,
+          successes: prev.successes + (result.pass ? 1 : 0),
+        }));
       } catch (e) {
         setMalleability({ error: e.message });
+      }
+      setRunning(false);
+    }, 10);
+  }
+
+  function runMalleabilityCounter() {
+    if (!keys || keys.error) return;
+    setRunning(true);
+    setTimeout(() => {
+      try {
+        const result = malleabilityCounterDemo(keys, message, trickTrials, 2n);
+        setTrickBatch(result);
+        setTrickCounter((prev) => ({
+          attempts: prev.attempts + result.trials,
+          successes: prev.successes + result.successes,
+        }));
+      } catch (e) {
+        setTrickBatch({ error: e.message });
       }
       setRunning(false);
     }, 10);
@@ -176,6 +216,8 @@ export default function PA16Panel() {
     }
   }
 
+  const trickRate = trickCounter.attempts === 0 ? Number.NaN : trickCounter.successes / trickCounter.attempts;
+
   return (
     <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
       {/* ── Header ── */}
@@ -191,7 +233,7 @@ export default function PA16Panel() {
       <div style={{ padding: "16px" }}>
         <div style={{ padding: "10px 14px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 14, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
           ElGamal is randomized public-key encryption based on DDH hardness. It is IND-CPA secure, but it is multiplicatively malleable:
-          changing <span style={{ fontFamily: "var(--font-mono)" }}>(c₁, c₂)</span> to <span style={{ fontFamily: "var(--font-mono)" }}>(c₁, 2c₂ mod p)</span> decrypts to <span style={{ fontFamily: "var(--font-mono)" }}>2m mod p</span>.
+          changing <span style={{ fontFamily: "var(--font-mono)" }}>(c₁, c₂)</span> to <span style={{ fontFamily: "var(--font-mono)" }}>(c₁, 2c₂ mod p)</span> decrypts to <span style={{ fontFamily: "var(--font-mono)" }}>2m mod p</span>. The malleability trick is deterministic, so its success rate should be 100%.
         </div>
 
         {/* ═══ Group and key generation ═══ */}
@@ -268,19 +310,35 @@ export default function PA16Panel() {
         )}
 
         {/* ═══ Malleability ═══ */}
-        <SectionHeading>Required malleability attack</SectionHeading>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <SectionHeading>Required malleability attack — 100% success counter</SectionHeading>
+        <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap", marginBottom: 12 }}>
           <ActionButton onClick={runMalleability} disabled={!keys || keys.error || running} tone="orange">
-            Run (c₁, 2c₂ mod p) attack
+            Run trick once
           </ActionButton>
-          <span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>
+          <div style={{ width: 120 }}>
+            <FieldLabel>Counter trials</FieldLabel>
+            <TextInput value={trickTrials} onChange={setTrickTrials} placeholder="20" />
+          </div>
+          <ActionButton onClick={runMalleabilityCounter} disabled={!keys || keys.error || running} tone="green">
+            Run counter test
+          </ActionButton>
+          <ActionButton onClick={resetTrickCounter} disabled={running} tone="red">
+            Reset counter
+          </ActionButton>
+          <span style={{ fontSize: 11, color: "var(--color-text-secondary)", alignSelf: "center" }}>
             The attacker does not need the secret key x.
           </span>
         </div>
 
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10, marginBottom: 12 }}>
+          <StatCard label="trick successes" value={`${trickCounter.successes}/${trickCounter.attempts}`} accent={trickCounter.attempts > 0 && trickCounter.successes === trickCounter.attempts ? "#0F6E56" : undefined} />
+          <StatCard label="trick success rate" value={percent(trickRate)} accent={trickCounter.attempts > 0 && trickCounter.successes === trickCounter.attempts ? "#0F6E56" : "#A32D2D"} />
+          <StatCard label="expected by theory" value="100%" accent="#0F6E56" />
+        </div>
+
         {malleability?.error && <div style={{ color: "#A32D2D", fontSize: 12, marginBottom: 12 }}>{malleability.error}</div>}
         {malleability && !malleability.error && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 12, marginBottom: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 12, marginBottom: 12 }}>
             <div style={{ border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", padding: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 8 }}>Original ciphertext</div>
               <BigLine label="m" value={malleability.message} />
@@ -301,8 +359,25 @@ export default function PA16Panel() {
           </div>
         )}
 
+        {trickBatch?.error && <div style={{ color: "#A32D2D", fontSize: 12, marginBottom: 12 }}>{trickBatch.error}</div>}
+        {trickBatch && !trickBatch.error && (
+          <div style={{ border: "0.5px solid #1D9E75", borderRadius: "var(--border-radius-md)", padding: 12, background: "#F7FFFC", marginBottom: 18 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10, marginBottom: 10 }}>
+              <StatCard label="last batch" value={`${trickBatch.successes}/${trickBatch.trials} succeeded`} accent={trickBatch.allPassed ? "#0F6E56" : "#A32D2D"} />
+              <StatCard label="batch success rate" value={percent(trickBatch.successRate)} accent={trickBatch.allPassed ? "#0F6E56" : "#A32D2D"} />
+              <StatCard label="failures" value={trickBatch.failures.toString()} accent={trickBatch.failures === 0 ? "#0F6E56" : "#A32D2D"} />
+            </div>
+            <MonoBox maxH={120}>
+              {trickBatch.log.map(row => `#${row.round}: Dec(c1, 2c2 mod p) = ${row.decrypted}; expected ${row.expected}; ${row.pass ? "success" : "fail"}`).join("\n")}
+            </MonoBox>
+          </div>
+        )}
+
         {/* ═══ IND-CPA game ═══ */}
         <SectionHeading>IND-CPA simulation</SectionHeading>
+        <div style={{ padding: "8px 10px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", marginBottom: 12, fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.6 }}>
+          This is a random-guessing adversary, so its guess rate should hover near 50%. The 100% success-rate requirement belongs to the malleability trick above, not to IND-CPA guessing.
+        </div>
         <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ width: 150 }}>
             <FieldLabel>m₀</FieldLabel>
@@ -325,7 +400,7 @@ export default function PA16Panel() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, marginBottom: 10 }}>
               <StatCard label="rounds" value={cpaResult.rounds} />
               <StatCard label="correct guesses" value={cpaResult.correct} />
-              <StatCard label="success rate" value={`${(cpaResult.successRate * 100).toFixed(1)}%`} />
+              <StatCard label="adversary guess rate" value={percent(cpaResult.successRate)} />
               <StatCard label="advantage" value={cpaResult.advantage.toFixed(3)} accent={cpaResult.advantage <= 0.25 ? "#0F6E56" : "#A32D2D"} />
             </div>
             <MonoBox maxH={110}>
