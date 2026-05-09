@@ -3,7 +3,6 @@
 // Enc-then-MAC · Malleability attack · Key separation · IND-CCA2 game
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { useState } from "react";
 import {
   ccaEnc, ccaDec,
   malleabilityDemo,
@@ -14,6 +13,7 @@ import {
 import {
   FieldLabel, TextInput, ToggleBar, SectionHeading,
 } from "../shared/ui.jsx";
+import { useState, useEffect } from "react";
 
 // ── shared tiny components ────────────────────────────────────────────────────
 
@@ -196,6 +196,9 @@ export default function PA6Panel() {
     setDecResult(null);
   }
   function doMal()  { setMalResult(malleabilityDemo(malKE, malKM, malMsg, malBit, prfType)); }
+  useEffect(() => {
+    if (malResult) doMal();
+  }, [malKE, malKM, malMsg, malBit, prfType]);
   function doSep()  { setSepResult(keySeparationDemo(sepKey, sepMsg, prfType)); }
   function doCCA2() {
     if (ccaM0.length !== ccaM1.length) return;
