@@ -4,16 +4,51 @@
 
 import { fakeHex, seedFromHex } from "../utils/crypto.js";
 
+// export const REDUCTIONS = {
+//   "OWF→PRG":   { name: "HILL / hard-core-bit iteration",        pa: "PA#3",  security: "PRG-security from OWF hardness (HILL thm.)" },
+//   "OWF→OWP":   { name: "DLP: f(x) = gˣ mod p is a OWP on ℤ_q", pa: "PA#1",  security: "OWP hardness = DLP hardness" },
+//   "PRG→PRF":   { name: "GGM tree construction",                  pa: "PA#3",  security: "PRF-adv ≤ O(n)·PRG-adv (GGM thm.)" },
+//   "PRF→PRP":   { name: "Luby-Rackoff 3-round Feistel",           pa: "PA#2",  security: "PRP-adv ≤ PRF-adv + q²/2ⁿ (LR thm.)" },
+//   "PRF→MAC":   { name: "MAC_k(m) = F_k(m)",                      pa: "PA#5",  security: "MAC-forgery ⟹ PRF-distinguisher" },
+//   "PRP→MAC":   { name: "PRP/PRF switching lemma, then MAC",       pa: "PA#5",  security: "PRP-adv ≈ PRF-adv (switching lemma)" },
+//   "CRHF→HMAC": { name: "HMAC construction (PA#10)",               pa: "PA#10", security: "HMAC secure if compression fn is PRF" },
+//   "HMAC→MAC":  { name: "HMAC is a secure EUF-CMA MAC",            pa: "PA#10", security: "Forgery breaks inner-hash PRF" },
+//   "OWP→PRG":   { name: "OWP + hard-core predicate → PRG",        pa: "PA#3",  security: "G(x) = (f(x), b(x)) expands by 1 bit" },
+//   "PRG→OWF":   { name: "Any PRG G is a OWF; f(s) = G(s)",        pa: "PA#3",  security: "Inversion of f recovers seed ⟹ breaks PRG" },
+//   "PRF→PRG":   { name: "G(s) = F_s(0) ‖ F_s(1)",                 pa: "PA#3",  security: "PRG-dist ⟹ PRF-dist (contrapositive)" },
+//   "PRP→PRF":   { name: "PRP/PRF switching lemma",                 pa: "PA#2",  security: "PRP over large domain ≈ PRF" },
+//   "MAC→PRF":   { name: "EUF-CMA MAC on uniform msgs is PRF",      pa: "PA#5",  security: "Unforgeability ⟹ pseudorandomness" },
+//   "MAC→CRHF":  { name: "Merkle-Damgård from MAC compression fn",  pa: "PA#7",  security: "Collision ⟹ MAC forgery" },
+//   "MAC→HMAC":  { name: "Cast MAC as HMAC inner compression step",  pa: "PA#10", security: "HMAC is the natural PRF-based MAC structure" },
+//   "HMAC→CRHF": { name: "Fix key k; H'(m) = HMAC_k(m) is CR",     pa: "PA#9",  security: "Collision = MAC forgery" },
+// };
+
+// export const MULTI_STEP_PATHS = {
+//   "OWF→PRF":  ["OWF→PRG","PRG→PRF"], "OWF→PRP":  ["OWF→PRG","PRG→PRF","PRF→PRP"],
+//   "OWF→MAC":  ["OWF→PRG","PRG→PRF","PRF→MAC"], "OWF→HMAC": ["OWF→PRG","PRG→PRF","PRF→MAC","MAC→HMAC"],
+//   "OWF→CRHF": ["OWF→PRG","PRG→PRF","PRF→MAC","MAC→CRHF"], "PRG→PRP":  ["PRG→PRF","PRF→PRP"],
+//   "PRG→MAC":  ["PRG→PRF","PRF→MAC"], "PRG→HMAC": ["PRG→PRF","PRF→MAC","MAC→HMAC"],
+//   "PRG→CRHF": ["PRG→PRF","PRF→MAC","MAC→CRHF"], "PRF→HMAC": ["PRF→MAC","MAC→HMAC"],
+//   "PRF→CRHF": ["PRF→MAC","MAC→CRHF"], "PRP→HMAC": ["PRP→MAC","MAC→HMAC"],
+//   "PRP→CRHF": ["PRP→MAC","MAC→CRHF"], "CRHF→MAC": ["CRHF→HMAC","HMAC→MAC"],
+//   "OWP→PRF":  ["OWP→PRG","PRG→PRF"], "OWP→PRP":  ["OWP→PRG","PRG→PRF","PRF→PRP"],
+//   "OWP→MAC":  ["OWP→PRG","PRG→PRF","PRF→MAC"], "OWP→HMAC": ["OWP→PRG","PRG→PRF","PRF→MAC","MAC→HMAC"],
+//   "OWP→CRHF": ["OWP→PRG","PRG→PRF","PRF→MAC","MAC→CRHF"],
+// };
+
 export const REDUCTIONS = {
-  "OWF→PRG":   { name: "HILL / hard-core-bit iteration",        pa: "PA#3",  security: "PRG-security from OWF hardness (HILL thm.)" },
+  // ── Foundational upward reductions ──────────────────────────────────────────
+  "OWF→PRG":   { name: "HILL / hard-core-bit iteration",         pa: "PA#3",  security: "PRG-security from OWF hardness (HILL thm.)" },
   "OWF→OWP":   { name: "DLP: f(x) = gˣ mod p is a OWP on ℤ_q", pa: "PA#1",  security: "OWP hardness = DLP hardness" },
+  "OWP→PRG":   { name: "OWP + hard-core predicate → PRG",        pa: "PA#3",  security: "G(x) = (f(x), b(x)) expands by 1 bit" },
   "PRG→PRF":   { name: "GGM tree construction",                  pa: "PA#3",  security: "PRF-adv ≤ O(n)·PRG-adv (GGM thm.)" },
   "PRF→PRP":   { name: "Luby-Rackoff 3-round Feistel",           pa: "PA#2",  security: "PRP-adv ≤ PRF-adv + q²/2ⁿ (LR thm.)" },
   "PRF→MAC":   { name: "MAC_k(m) = F_k(m)",                      pa: "PA#5",  security: "MAC-forgery ⟹ PRF-distinguisher" },
   "PRP→MAC":   { name: "PRP/PRF switching lemma, then MAC",       pa: "PA#5",  security: "PRP-adv ≈ PRF-adv (switching lemma)" },
   "CRHF→HMAC": { name: "HMAC construction (PA#10)",               pa: "PA#10", security: "HMAC secure if compression fn is PRF" },
   "HMAC→MAC":  { name: "HMAC is a secure EUF-CMA MAC",            pa: "PA#10", security: "Forgery breaks inner-hash PRF" },
-  "OWP→PRG":   { name: "OWP + hard-core predicate → PRG",        pa: "PA#3",  security: "G(x) = (f(x), b(x)) expands by 1 bit" },
+
+  // ── Downward / reverse reductions ───────────────────────────────────────────
   "PRG→OWF":   { name: "Any PRG G is a OWF; f(s) = G(s)",        pa: "PA#3",  security: "Inversion of f recovers seed ⟹ breaks PRG" },
   "PRF→PRG":   { name: "G(s) = F_s(0) ‖ F_s(1)",                 pa: "PA#3",  security: "PRG-dist ⟹ PRF-dist (contrapositive)" },
   "PRP→PRF":   { name: "PRP/PRF switching lemma",                 pa: "PA#2",  security: "PRP over large domain ≈ PRF" },
@@ -21,19 +56,64 @@ export const REDUCTIONS = {
   "MAC→CRHF":  { name: "Merkle-Damgård from MAC compression fn",  pa: "PA#7",  security: "Collision ⟹ MAC forgery" },
   "MAC→HMAC":  { name: "Cast MAC as HMAC inner compression step",  pa: "PA#10", security: "HMAC is the natural PRF-based MAC structure" },
   "HMAC→CRHF": { name: "Fix key k; H'(m) = HMAC_k(m) is CR",     pa: "PA#9",  security: "Collision = MAC forgery" },
+
+  // ── NEW: missing edges ───────────────────────────────────────────────────────
+  "OWP→OWF":   { name: "Any OWP is a OWF (permutation ⊆ function)", pa: "PA#1",  security: "OWP inversion ⟹ OWF inversion" },
+  "PRF→OWF":   { name: "f(k) = F_k(0) is a OWF",                    pa: "PA#3",  security: "PRF inversion recovers key ⟹ PRF-distinguisher" },
+  "PRP→OWF":   { name: "f(k) = E_k(0) is a OWF",                    pa: "PA#2",  security: "PRP inversion recovers key ⟹ PRP-distinguisher" },
+  "HMAC→PRF":  { name: "HMAC with fixed key is a PRF",               pa: "PA#10", security: "HMAC pseudorandomness ⟹ PRF indistinguishability" },
+  "MAC→OWF":   { name: "MAC→PRF→OWF; f(k) = MAC_k(0) is a OWF",    pa: "PA#5",  security: "MAC inversion recovers key ⟹ MAC forgery" },
 };
 
 export const MULTI_STEP_PATHS = {
-  "OWF→PRF":  ["OWF→PRG","PRG→PRF"], "OWF→PRP":  ["OWF→PRG","PRG→PRF","PRF→PRP"],
-  "OWF→MAC":  ["OWF→PRG","PRG→PRF","PRF→MAC"], "OWF→HMAC": ["OWF→PRG","PRG→PRF","PRF→MAC","MAC→HMAC"],
-  "OWF→CRHF": ["OWF→PRG","PRG→PRF","PRF→MAC","MAC→CRHF"], "PRG→PRP":  ["PRG→PRF","PRF→PRP"],
-  "PRG→MAC":  ["PRG→PRF","PRF→MAC"], "PRG→HMAC": ["PRG→PRF","PRF→MAC","MAC→HMAC"],
-  "PRG→CRHF": ["PRG→PRF","PRF→MAC","MAC→CRHF"], "PRF→HMAC": ["PRF→MAC","MAC→HMAC"],
-  "PRF→CRHF": ["PRF→MAC","MAC→CRHF"], "PRP→HMAC": ["PRP→MAC","MAC→HMAC"],
-  "PRP→CRHF": ["PRP→MAC","MAC→CRHF"], "CRHF→MAC": ["CRHF→HMAC","HMAC→MAC"],
-  "OWP→PRF":  ["OWP→PRG","PRG→PRF"], "OWP→PRP":  ["OWP→PRG","PRG→PRF","PRF→PRP"],
-  "OWP→MAC":  ["OWP→PRG","PRG→PRF","PRF→MAC"], "OWP→HMAC": ["OWP→PRG","PRG→PRF","PRF→MAC","MAC→HMAC"],
-  "OWP→CRHF": ["OWP→PRG","PRG→PRF","PRF→MAC","MAC→CRHF"],
+  // ── OWF as source ───────────────────────────────────────────────────────────
+  "OWF→PRF":  ["OWF→PRG", "PRG→PRF"],
+  "OWF→PRP":  ["OWF→PRG", "PRG→PRF", "PRF→PRP"],
+  "OWF→MAC":  ["OWF→PRG", "PRG→PRF", "PRF→MAC"],
+  "OWF→HMAC": ["OWF→PRG", "PRG→PRF", "PRF→MAC", "MAC→HMAC"],
+  "OWF→CRHF": ["OWF→PRG", "PRG→PRF", "PRF→MAC", "MAC→CRHF"],
+
+  // ── OWP as source ───────────────────────────────────────────────────────────
+  "OWP→PRF":  ["OWP→PRG", "PRG→PRF"],
+  "OWP→PRP":  ["OWP→PRG", "PRG→PRF", "PRF→PRP"],
+  "OWP→MAC":  ["OWP→PRG", "PRG→PRF", "PRF→MAC"],
+  "OWP→HMAC": ["OWP→PRG", "PRG→PRF", "PRF→MAC", "MAC→HMAC"],
+  "OWP→CRHF": ["OWP→PRG", "PRG→PRF", "PRF→MAC", "MAC→CRHF"],
+
+  // ── PRG as source ───────────────────────────────────────────────────────────
+  "PRG→PRP":  ["PRG→PRF", "PRF→PRP"],
+  "PRG→MAC":  ["PRG→PRF", "PRF→MAC"],
+  "PRG→HMAC": ["PRG→PRF", "PRF→MAC", "MAC→HMAC"],
+  "PRG→CRHF": ["PRG→PRF", "PRF→MAC", "MAC→CRHF"],
+  // "PRG→OWF":  // direct — already in REDUCTIONS
+
+  // ── PRF as source ───────────────────────────────────────────────────────────
+  "PRF→HMAC": ["PRF→MAC", "MAC→HMAC"],
+  "PRF→CRHF": ["PRF→MAC", "MAC→CRHF"],
+  // PRF→PRG and PRF→OWF are direct — already in REDUCTIONS
+
+  // ── PRP as source ───────────────────────────────────────────────────────────
+  "PRP→HMAC": ["PRP→MAC", "MAC→HMAC"],
+  "PRP→CRHF": ["PRP→MAC", "MAC→CRHF"],
+  "PRP→PRG":  ["PRP→PRF", "PRF→PRG"],
+  // "PRP→OWF":  // direct — already in REDUCTIONS
+
+  // ── MAC as source ───────────────────────────────────────────────────────────
+  "MAC→PRG":  ["MAC→PRF", "PRF→PRG"],
+  "MAC→PRP":  ["MAC→PRF", "PRF→PRP"],
+  // "MAC→OWF":  // direct — already in REDUCTIONS
+
+  // ── CRHF as source ──────────────────────────────────────────────────────────
+  "CRHF→MAC": ["CRHF→HMAC", "HMAC→MAC"],
+  "CRHF→PRF": ["CRHF→HMAC", "HMAC→PRF"],
+  "CRHF→PRG": ["CRHF→HMAC", "HMAC→PRF", "PRF→PRG"],
+  "CRHF→OWF": ["CRHF→HMAC", "HMAC→PRF", "PRF→OWF"],
+
+  // ── HMAC as source ──────────────────────────────────────────────────────────
+  "HMAC→PRG": ["HMAC→PRF", "PRF→PRG"],
+  "HMAC→OWF": ["HMAC→PRF", "PRF→OWF"],
+  "HMAC→PRP": ["HMAC→PRF", "PRF→PRP"],
+  // HMAC→MAC, HMAC→CRHF, HMAC→PRF are direct — already in REDUCTIONS
 };
 
 export function getRoute(src, tgt) {
