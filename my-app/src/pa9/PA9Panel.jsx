@@ -500,6 +500,16 @@ export default function PA9Panel() {
             Regenerate h parameter
           </button>
         </div>
+        <div style={{ borderTop: "0.5px solid var(--color-border-tertiary)", marginTop: 16, paddingTop: 14 }}>
+          <SectionHeading>Real-World Context: Why Output Length Matters</SectionHeading>
+          <div style={{ fontSize: 11, color: "var(--color-text-secondary)", lineHeight: 1.6 }}>
+            <p>At a standard CPU speed of 10<sup>9</sup> hashes/second:</p>
+            <ul style={{ margin: "4px 0 0 20px" }}>
+              <li><strong>MD5 (128-bit):</strong> Expected 2<sup>64</sup> hashes ≈ 584 years on a single CPU. (Easily broken with modern GPU clusters).</li>
+              <li><strong>SHA-1 (160-bit):</strong> Expected 2<sup>80</sup> hashes ≈ 38 million years. (Broken by Google/CWI in 2017 using massive parallelization; deprecated).</li>
+            </ul>
+          </div>
+        </div>
       </div>
     </div>
   );
